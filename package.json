@@ -1,0 +1,15 @@
+{
+  "name": "demidof",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ray-Ban Display rotation simulator: fake rotational DoF on a head-locked 20° monocular display",
+  "type": "module",
+  "scripts": {
+    "serve": "python serve.py",
+    "serve:https": "python serve.py --https",
+    "test": "node test/smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

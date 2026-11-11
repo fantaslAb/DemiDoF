@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#0b0d10" />
+  <title>DemiDoF — Ray-Ban Display rotation simulator</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    { "imports": { "three": "./vendor/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+
+  <header id="brand">
+    <div class="logo">Demi<span>DoF</span></div>
+    <div class="sub">Ray-Ban Display · rotation simulator</div>
+  </header>
+
+  <div id="preview-label">
+    <span class="dot"></span> Device frame · <b id="rt-size">600 × 600</b> · what the glasses receive
+  </div>
+
+  <div id="readout">
+    <div><span>head</span><b id="ro-head">0° / 0° / 0°</b></div>
+    <div><span>display center</span><b id="ro-display">+12° / −8°</b></div>
+    <div><span>content offset</span><b id="ro-offset">0.0°</b></div>
+    <div><span>fps</span><b id="ro-fps">—</b></div>
+  </div>
+
+  <button id="panel-toggle" aria-label="Toggle controls">⚙</button>
+
+  <aside id="panel">
+    <section>
+      <h2>Anchoring</h2>
+      <div class="modes" role="radiogroup">
+        <label><input type="radio" name="mode" value="locked" /><span><em>1</em> Head-locked<small>stock 0 DoF</small></span></label>
+        <label><input type="radio" name="mode" value="world" checked /><span><em>2</em> World-locked<small>DemiDoF · 3 DoF</small></span></label>
+        <label><input type="radio" name="mode" value="lazy" /><span><em>3</em> Lazy follow<small>tethered</small></span></label>
+        <label><input type="radio" name="mode" value="level" /><span><em>4</em> Horizon-level<small>roll cancelled</small></span></label>
+      </div>
+      <div class="row lazy-only">
+        <label>Deadzone <output id="o-lazyDeadzone">8°</output></label>
+        <input type="range" id="p-lazyDeadzone" min="0" max="25" step="0.5" value="8" />
+      </div>
+      <div class="row lazy-only">
+        <label>Follow speed <output id="o-lazySpeed">5</output></label>
+        <input type="range" id="p-lazySpeed" min="0.5" max="20" step="0.5" value="5" />
+      </div>
+      <div class="btns">
+        <button id="b-recenter" title="C">Recenter content</button>
+        <button id="b-reset" title="R">Reset head</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Content</h2>
+      <select id="p-content">
+        <option value="workspace">Wide workspace · cards across 120°</option>
+        <option value="hud">HUD demo · clock, notification, nav</option>
+        <option value="grid">Angular test grid</option>
+      </select>
+    </section>
+
+    <section>
+      <h2>Display placement</h2>
+      <div class="row">
+        <label>Field of view <output id="o-fov">20°</output></label>
+        <input type="range" id="p-fov" min="8" max="45" step="0.5" value="20" />
+      </div>
+      <div class="row">
+        <label>Horizontal offset <output id="o-offsetH">+12°</output></label>
+        <input type="range" id="p-offsetH" min="-40" max="40" step="0.5" value="12" />
+      </div>
+      <div class="row">
+        <label>Vertical offset <output id="o-offsetV">−8°</output></label>
+        <input type="range" id="p-offsetV" min="-40" max="40" step="0.5" value="-8" />
+      </div>
+      <div class="row">
+        <label>Roll <output id="o-roll">0°</output></label>
+        <input type="range" id="p-roll" min="-45" max="45" step="0.5" value="0" />
+      </div>
+      <div class="row">
+        <label>Perceived distance <output id="o-distance">2.0 m</output></label>
+        <input type="range" id="p-distance" min="0.5" max="6" step="0.1" value="2" />
+      </div>
+      <div class="btns">
+        <button id="b-preset-rbd">Ray-Ban Display preset</button>
+        <button id="b-preset-center">Centered</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Optics</h2>
+      <div class="row">
+        <label>Brightness <output id="o-brightness">1.0</output></label>
+        <input type="range" id="p-brightness" min="0.2" max="2.5" step="0.05" value="1" />
+      </div>
+      <div class="row">
+        <label>Occlusion <output id="o-occlusion">0.35</output></label>
+        <input type="range" id="p-occlusion" min="0" max="1" step="0.05" value="0.35" />
+      </div>
+      <div class="row">
+        <label>Eyebox falloff <output id="o-vignette">0.6</output></label>
+        <input type="range" id="p-vignette" min="0" max="1" step="0.05" value="0.6" />
+      </div>
+      <label class="check"><input type="checkbox" id="p-showBounds" checked /> Show display bounds</label>
+      <label class="check"><input type="checkbox" id="p-rightEyeOnly" checked /> Right eye only (XR)</label>
+    </section>
+
+    <section>
+      <h2>Head input</h2>
+      <div class="btns">
+        <button id="b-gyro">Use phone gyro</button>
+        <button id="b-camera">Camera passthrough</button>
+      </div>
+      <label class="check"><input type="checkbox" id="p-demoMotion" /> Demo head motion</label>
+      <div class="row">
+        <label>Eye FOV (sim view) <output id="o-eyeFov">70°</output></label>
+        <input type="range" id="p-eyeFov" min="40" max="110" step="1" value="70" />
+      </div>
+    </section>
+
+    <section>
+      <h2>Output</h2>
+      <div class="btns">
+        <button id="b-png">Save device frame PNG</button>
+        <button id="b-xr" hidden>Enter XR</button>
+      </div>
+      <p class="note" id="xr-note">WebXR not available in this browser.</p>
+      <p class="note"><a href="glasses.html">Open the glasses build</a> — the 600 × 600 Web App that runs on the Ray-Ban Display itself.</p>
+    </section>
+  </aside>
+
+  <footer id="hint">
+    <span><kbd>drag</kbd> look</span>
+    <span><kbd>Q</kbd><kbd>E</kbd> roll</span>
+    <span><kbd>1–4</kbd> mode</span>
+    <span><kbd>C</kbd> recenter</span>
+    <span><kbd>R</kbd> reset</span>
+  </footer>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "name": "DemiDoF",
+  "short_name": "DemiDoF",
+  "description": "World-anchored content on the head-locked Ray-Ban Display.",
+  "start_url": "./glasses.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "assets/icon-96.png", "sizes": "96x96", "type": "image/png" },
+    { "src": "assets/icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
