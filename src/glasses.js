@@ -41,7 +41,7 @@ function loadSettings() {
 function saveSettings(s) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage may be unavailable */ }
 }
-const settings = Object.assign({ mode: 'world', content: 'workspace', frame: 0, hud: false, motion: 'sensor' }, loadSettings());
+const settings = Object.assign({ mode: 'world', content: 'workspace', frame: 0, fix: null, hud: false, motion: 'gyro' }, loadSettings());
 
 const params = {
   mode: MODE_ORDER.includes(settings.mode) ? settings.mode : 'world',
@@ -82,6 +82,7 @@ content.setPreset(params.content);
 const display = new DisplayModel(params);
 const head = new GlassesHead(canvas);
 head.frameIndex = Number.isInteger(settings.frame) ? settings.frame % FRAMES.length : 0;
+if (Array.isArray(settings.fix) && settings.fix.length === 4) head.customFix = new THREE.Quaternion().fromArray(settings.fix).normalize();
 head.onReset = () => display.recenter();
 head.motion = 'manual';
 
@@ -115,6 +116,7 @@ function persist() {
   settings.mode = params.mode;
   settings.content = params.content;
   settings.frame = head.frameIndex;
+  settings.fix = head.customFix ? head.customFix.toArray() : null;
   settings.hud = !hud.classList.contains('hidden');
   if (started) settings.motion = motionChoice; // before Start the head is still in its initial state
   saveSettings(settings);
@@ -147,8 +149,17 @@ function setHud(on) {
   persist();
 }
 function setFrameLabel() {
-  setLabel('b-frame', `${head.frameIndex + 1} / ${FRAMES.length}`);
+  setLabel('b-frame', head.customFix ? 'Calibrated' : `Preset ${head.frameIndex + 1}`);
 }
+
+// Axes calibration: nod down, then turn right. Guides the wearer through toasts.
+head.onCalib = (step, info) => {
+  if (step === 1) { setLabel('b-frame', 'Nod DOWN'); toast('Axes: nod your head DOWN', 8000); }
+  else if (step === 2) { setLabel('b-frame', 'Turn RIGHT'); toast('Axes: now turn your head RIGHT', 8000); }
+  else if (step === 'done') { setFrameLabel(); toast('Axes calibrated. Look ahead and press Center.', 4000); persist(); }
+  else { setFrameLabel(); toast('Axes calibration timed out. Press Axes to retry.', 4000); }
+  rlog.log('calib', { step, ...(info || {}) });
+};
 
 let sensorWatchdog = 0;
 let autoDemo = false;         // demo motion chosen by the watchdog, not by the wearer
@@ -216,11 +227,14 @@ $('b-motion').addEventListener('click', () => {
   setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(motionChoice) + 1) % MOTION_ORDER.length]);
 });
 $('b-frame').addEventListener('click', () => {
+  if (head.calib) { head.cancelCalibration(); setFrameLabel(); toast('Axes calibration cancelled'); return; }
+  if (head.calibrate()) return; // the onCalib hook takes over
+  // No gyroscope (desktop, simulator): fall back to cycling the presets.
   head.nextFrame();
   setFrameLabel();
   persist();
   toast(`Sensor axes: ${FRAMES[head.frameIndex].label}`);
-  rlog.log('axes', { index: head.frameIndex, id: FRAMES[head.frameIndex].id });
+  rlog.log('axes', { index: head.frameIndex, id: head.fixId });
 });
 
 /** Raw sensor state plus the resulting head pose, for the remote log. */
@@ -235,7 +249,7 @@ function rawSample() {
     rr: s.hasGyro ? [r1(s.rr.a), r1(s.rr.b), r1(s.rr.g)] : null,
     grav: s.hasGravity ? [r1(s.grav.x), r1(s.grav.y), r1(s.grav.z)] : null,
     yaw: r1(-e.yaw), pitch: r1(e.pitch), roll: r1(e.roll), off: r1(display.contentOffset()),
-    so: (screen.orientation && screen.orientation.angle) || 0, axes: FRAMES[head.frameIndex].id,
+    so: (screen.orientation && screen.orientation.angle) || 0, axes: head.fixId,
   };
 }
 $('b-hud').addEventListener('click', () => setHud(hud.classList.contains('hidden')));
@@ -327,7 +341,7 @@ function updateHud(q, dt) {
 ` +
     `head  <b>${fmtDeg(-e.yaw, true)}</b> / <b>${fmtDeg(e.pitch, true)}</b> / <b>${fmtDeg(e.roll, true)}</b>
 ` +
-    `offset ${fmtDeg(display.contentOffset())} · ${src} · axes ${FRAMES[head.frameIndex].id}
+    `offset ${fmtDeg(display.contentOffset())} · ${src} · axes ${head.fixId}
 ` +
     `perm ${s.permission} · ask fn ${s.permFn || '?'} ×${s.asked}${s.lastResult ? ` → ${s.lastResult} ${(s.askMs / 1000).toFixed(1)}s` : ''} · listen ${s.listening ? 'yes' : 'no'}
 ` +

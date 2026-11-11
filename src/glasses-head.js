@@ -5,28 +5,36 @@ import { DEG, quatFromYPR, yprFromQuat, clamp } from './math.js';
  * Head orientation for the on-glasses build.
  *
  * Sources, in order of preference:
- *   - 'sensor' : the glasses' IMU. Orientation events (`deviceorientation` /
- *                `deviceorientationabsolute`) when they arrive; otherwise the gyroscope from
- *                `devicemotion` (rotationRate) integrated over time, levelled with gravity.
+ *   - 'sensor' : the glasses' IMU. Either orientation events (`deviceorientation` /
+ *                `deviceorientationabsolute`) or the gyroscope from `devicemotion`
+ *                (rotationRate) integrated over time and levelled with gravity.
  *   - 'demo'   : scripted motion, so the page visibly works in Meta's simulator and on desktop
  *   - 'manual' : pointer drag only (desktop / Neural Band drag)
  *
- * The W3C orientation frame is defined for a phone screen; the sensor frame inside the
- * glasses is not documented. `FRAMES` lists corrections for the plausible mountings and the
- * menu lets the wearer cycle them until yaw / pitch / roll respond correctly.
+ * Frames. Raw sensor values are in the W3C device frame D (X right, Y top, Z out of the
+ * screen). Orientation events and the integrated gyro both give q_WD: D → Earth frame W
+ * (X east, Y north, Z up). `_qScreen` relabels W to the three.js world (Y up, -Z forward).
+ * `fix` maps the camera's local axes into D: it is what decides which sensor axis is the
+ * wearer's yaw, pitch and roll. The sensor frame inside the glasses is not documented, so
+ * `fix` either comes from a preset in `FRAMES` or from `calibrate()`, which measures the
+ * device axes of a nod and a head turn.
  */
 
 const _q = new THREE.Quaternion();
 const _qYaw = new THREE.Quaternion();
 const _qDemo = new THREE.Quaternion();
 const _qStep = new THREE.Quaternion();
+const _qCorr = new THREE.Quaternion();
 const _euler = new THREE.Euler();
 const _v = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
+const _v3 = new THREE.Vector3();
+const _m = new THREE.Matrix4();
 const _zee = new THREE.Vector3(0, 0, 1);
 const _xee = new THREE.Vector3(1, 0, 0);
 const _yee = new THREE.Vector3(0, 1, 0);
 const _q0 = new THREE.Quaternion();
-const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90° about X (three.js DeviceOrientationControls)
+const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90° about X: Earth (Z up) → three.js (Y up)
 
 const rx = (deg) => new THREE.Quaternion().setFromAxisAngle(_xee, deg * DEG);
 const ry = (deg) => new THREE.Quaternion().setFromAxisAngle(_yee, deg * DEG);
@@ -42,6 +50,12 @@ export const FRAMES = [
 
 /** Seconds of silence after which orientation events are considered gone. */
 const ORIENT_STALE_S = 1.0;
+/** Rotation (degrees) the wearer must perform for each calibration step. */
+const CALIB_STEP_DEG = 25;
+/** Seconds allowed per calibration step. */
+const CALIB_STEP_S = 8;
+/** Per-sample gain of the gravity correction on the integrated gyro (≈ 4 s time constant at 50 Hz). */
+const GRAVITY_GAIN = 0.005;
 
 export class GlassesHead {
   constructor(element) {
@@ -50,7 +64,8 @@ export class GlassesHead {
     this.motion = 'manual'; // 'sensor' | 'demo' | 'manual'
     this.preferGyro = false; // in 'sensor': integrate the gyroscope even when orientation events exist
     this.frameIndex = 0;
-    this.smoothing = 0.045; // seconds; time constant of the pose filter (0 = off)
+    this.customFix = null;   // calibrated camera→device rotation; overrides FRAMES when set
+    this.smoothing = 0.045;  // seconds; time constant of the pose filter (0 = off)
 
     // manual (drag) orientation
     this.yaw = 0;
@@ -73,10 +88,12 @@ export class GlassesHead {
       motionEvents: 0, motionLastAt: 0, motionRate: 0, hasGyro: false, hasGravity: false,
       rr: { a: 0, b: 0, g: 0 }, grav: { x: 0, y: 0, z: 0 },
     };
-    this._gyroQuat = new THREE.Quaternion(); // integrated device orientation (device → world)
+    this._qWD = new THREE.Quaternion(); // integrated gyro: device → Earth
     this._gyroSeeded = false;
     this._target = new THREE.Quaternion();
+    this.calib = null;
     this.onReset = null;
+    this.onCalib = null; // (step, info) => void; step 1 = nod down, 2 = turn right, 'done', 'fail'
     this._time = 0;
     this._drag = null;
     this._bind();
@@ -102,8 +119,12 @@ export class GlassesHead {
   }
 
   get frame() { return FRAMES[this.frameIndex]; }
-  setFrame(i) { this.frameIndex = ((i % FRAMES.length) + FRAMES.length) % FRAMES.length; this.resetHead(); }
+  /** The camera→device rotation in use: the calibration if there is one, else the preset. */
+  get fix() { return this.customFix || this.frame.fix; }
+  get fixId() { return this.customFix ? 'calibrated' : this.frame.id; }
+  setFrame(i) { this.frameIndex = ((i % FRAMES.length) + FRAMES.length) % FRAMES.length; this.customFix = null; this.resetHead(); }
   nextFrame() { this.setFrame(this.frameIndex + 1); }
+  setCustomFix(q) { this.customFix = q ? new THREE.Quaternion().copy(q).normalize() : null; this.resetHead(); }
 
   /** True when any motion-sensor API exists at all. */
   static sensorAvailable() {
@@ -189,6 +210,7 @@ export class GlassesHead {
       s.motionEvents++;
       if (hasG) { s.hasGravity = true; s.grav.x = g.x; s.grav.y = g.y; s.grav.z = g.z; }
       if (hasRR) { s.hasGyro = true; s.rr.a = rr.alpha; s.rr.b = rr.beta; s.rr.g = rr.gamma; }
+      if (hasRR && this.calib) this._calibStep(dt, now);
       // Gyro integration is used while orientation events are absent, or when preferred.
       const orientFresh = s.lastAt && (now - s.lastAt) / 1000 < ORIENT_STALE_S;
       if ((orientFresh && !this.preferGyro) || !hasRR) return;
@@ -219,35 +241,96 @@ export class GlassesHead {
     return (performance.now() - Math.max(s.lastAt, s.motionLastAt)) / 1000;
   }
 
-  /**
-   * Integrate rotationRate (deg/s about the device x/y/z axes = beta/gamma/alpha) into a
-   * device→world quaternion in the same convention the orientation events use. On the
-   * first sample the attitude is levelled from gravity so pitch and roll start correct.
-   */
+  // ---------------------------------------------------------------------------
+  // Gyro integration (device frame D → Earth frame W, both W3C)
+
+  /** Body-frame angular velocity in D, radians per second. */
+  _omega(target) {
+    const r = this.sensor.rr;
+    return target.set(r.b * DEG, r.g * DEG, r.a * DEG); // beta about X, gamma about Y, alpha about Z
+  }
+
+  /** Measured "up" in D from accelerationIncludingGravity (flat device at rest → +Z). */
+  _upD(target) {
+    const g = this.sensor.grav;
+    target.set(g.x, g.y, g.z);
+    return target.lengthSq() > 1 ? target.normalize() : target.set(0, 0, 1);
+  }
+
   _integrateGyro(dt) {
     const s = this.sensor;
     if (!this._gyroSeeded) {
-      if (s.hasGravity) {
-        // Gravity in device axes gives beta / gamma (same formulas as the W3C spec's examples).
-        const { x, y, z } = s.grav;
-        const beta = Math.atan2(y, z) / DEG;              // front-back tilt
-        const gamma = Math.atan2(-x, Math.hypot(y, z)) / DEG; // left-right tilt
-        _euler.set(beta * DEG, 0, -gamma * DEG, 'YXZ');
-      } else {
-        _euler.set(90 * DEG, 0, 0, 'YXZ'); // assume upright
-      }
-      this._gyroQuat.setFromEuler(_euler);
+      // Level the attitude from gravity; heading is arbitrary until the first recenter.
+      if (s.hasGravity) this._qWD.setFromUnitVectors(this._upD(_v), _zee);
+      else this._qWD.identity();
       this._gyroSeeded = true;
       return;
     }
     if (!(dt > 0)) return;
-    // Body-frame angular velocity: x = beta, y = gamma, z = alpha (deg/s)
-    _v.set(s.rr.b * DEG, s.rr.g * DEG, s.rr.a * DEG);
+    this._omega(_v);
     const w = _v.length();
-    if (w < 1e-6) return;
-    _qStep.setFromAxisAngle(_v.multiplyScalar(1 / w), w * dt);
-    this._gyroQuat.multiply(_qStep).normalize();
+    if (w > 1e-6) {
+      _qStep.setFromAxisAngle(_v.multiplyScalar(1 / w), w * dt);
+      this._qWD.multiply(_qStep).normalize(); // q ← q ⊗ Δq (body-frame rates)
+    }
+    if (s.hasGravity && GRAVITY_GAIN > 0) {
+      // Pull the predicted up towards the measured up, slowly, so tilt does not drift.
+      _v2.copy(_zee).applyQuaternion(_q0.copy(this._qWD).invert()); // predicted up in D
+      this._upD(_v3);
+      _qCorr.setFromUnitVectors(_v2, _v3);
+      _q0.identity().slerp(_qCorr, GRAVITY_GAIN);
+      this._qWD.multiply(_q0).normalize();
+    }
   }
+
+  // ---------------------------------------------------------------------------
+  // Calibration: which device axes are the wearer's pitch and yaw
+
+  /**
+   * Start the two-step calibration. Step 1: the wearer nods DOWN; step 2: the wearer turns
+   * RIGHT. Each step integrates rotationRate until CALIB_STEP_DEG of rotation has happened;
+   * the two rotation axes in D define the camera's X (right) and Y (up) axes.
+   */
+  calibrate() {
+    if (!this.sensor.listening || !this.sensor.hasGyro) return false;
+    this.calib = { step: 1, vec: new THREE.Vector3(), t0: performance.now(), down: null };
+    if (this.onCalib) this.onCalib(1);
+    return true;
+  }
+  cancelCalibration() { this.calib = null; }
+
+  _calibStep(dt, now) {
+    const c = this.calib;
+    if ((now - c.t0) / 1000 > CALIB_STEP_S) {
+      this.calib = null;
+      if (this.onCalib) this.onCalib('fail', { step: c.step, deg: c.vec.length() / DEG });
+      return;
+    }
+    if (!(dt > 0)) return;
+    c.vec.addScaledVector(this._omega(_v), dt);
+    if (c.vec.length() < CALIB_STEP_DEG * DEG) return;
+    const axis = c.vec.clone().normalize();
+    if (c.step === 1) {
+      c.down = axis;
+      c.step = 2; c.vec.set(0, 0, 0); c.t0 = now;
+      if (this.onCalib) this.onCalib(2);
+      return;
+    }
+    // Looking down is rotation about -X_cam; turning right is rotation about -Y_cam.
+    const X = c.down.clone().negate();
+    const Y = axis.clone().negate();
+    Y.addScaledVector(X, -X.dot(Y));
+    if (Y.lengthSq() < 0.1) { this.calib = null; if (this.onCalib) this.onCalib('fail', { step: 2, reason: 'axes too close' }); return; }
+    Y.normalize();
+    const Z = new THREE.Vector3().crossVectors(X, Y);
+    _m.makeBasis(X, Y, Z); // columns: camera axes expressed in D  ⇒  camera → D
+    const fix = new THREE.Quaternion().setFromRotationMatrix(_m);
+    this.calib = null;
+    this.setCustomFix(fix);
+    if (this.onCalib) this.onCalib('done', { fix: fix.toArray(), down: c.down.toArray(), right: axis.toArray() });
+  }
+
+  // ---------------------------------------------------------------------------
 
   /** Make the current heading the new forward direction. */
   resetHead() {
@@ -262,18 +345,19 @@ export class GlassesHead {
     if (this.onReset) this.onReset();
   }
 
+  /** Camera orientation in the three.js world, before the yaw offset. */
   _sensorQuat(target) {
     const s = this.sensor;
     const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
     if (s.source === 'gyro') {
-      target.copy(this._gyroQuat);
+      target.copy(_qScreen).multiply(this._qWD);               // three ← W ← D
     } else {
       _euler.set(s.beta * DEG, s.alpha * DEG, -s.gamma * DEG, 'YXZ');
-      target.setFromEuler(_euler);
+      target.setFromEuler(_euler);                              // = _qScreen ⊗ q_WD ⊗ _qScreen⁻¹
+      target.multiply(_qScreen);                                // three ← D
     }
-    target.multiply(_qScreen);
-    target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG));
-    target.multiply(this.frame.fix);
+    target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG)); // screen rotation (phones)
+    target.multiply(this.fix);                                  // D ← camera
     return target;
   }
 

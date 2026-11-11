@@ -90,6 +90,8 @@ try {
   await gset(() => { DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted'); });
   await g.keyboard.press('Enter'); // Start: attaches the orientation listener
   await sleep(200);
+  await gset(() => window.__glasses.setMotion('sensor')); // orientation events (the default is Gyro)
+  await sleep(100);
 
   // Feed synthetic IMU events before the 2.5 s watchdog falls back to demo motion.
   const feed = (alpha, beta, gamma) => gset(([a, b, c]) => {
@@ -163,23 +165,43 @@ try {
   });
   await g3.keyboard.press('Enter');
   await sleep(200);
-  const feedMotion = (a) => g3.evaluate((alpha) => {
+  // Device held upright like a phone (W3C frame): gravity reads +9.81 along +Y.
+  const feedMotion = ([a, b, c]) => g3.evaluate(([alpha, beta, gamma]) => {
     window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
-      rotationRate: { alpha, beta: 0, gamma: 0 },
-      accelerationIncludingGravity: { x: 0, y: 9.81, z: 0 }, // upright: gravity along -Y of the device
+      rotationRate: { alpha, beta, gamma },
+      accelerationIncludingGravity: { x: 0, y: 9.81, z: 0 },
       interval: 50,
     }));
-  }, a);
-  await feedMotion(0); // seeds the attitude from gravity
-  for (let i = 0; i < 8; i++) { await sleep(50); await feedMotion(-120); } // ~ -120 deg/s about the device z axis
+  }, [a, b, c]);
+  const burst = async (rate, n = 8) => { for (let i = 0; i < n; i++) { await sleep(50); await feedMotion(rate); } };
+  await feedMotion([0, 0, 0]); // seeds the attitude from gravity
+  await burst([0, 0, -120]); // yaw: ~ -120 deg/s about the device Y axis = turning right for the upright frame
   await sleep(400);
   const gyro = await g3.evaluate(() => {
     const h = window.__glasses.head;
-    return { motion: h.motion, source: h.sensor.source, has: h.sensor.has, motionEvents: h.sensor.motionEvents, offset: window.__glasses.display.contentOffset() };
+    const e = window.__glasses.head.quaternion;
+    return { motion: h.motion, source: h.sensor.source, has: h.sensor.has, motionEvents: h.sensor.motionEvents, offset: window.__glasses.display.contentOffset(), q: e.toArray() };
   });
   console.log('glasses gyro', gyro);
   if (gyro.motion !== 'sensor' || gyro.source !== 'gyro') errors.push(`glasses: gyro fallback not active: ${JSON.stringify(gyro)}`);
   if (!(gyro.offset > 5)) errors.push(`glasses: gyro integration produced no rotation (offset ${gyro.offset})`);
+
+  // Axes calibration: nod down (about -X of the upright device), then turn right (about -Y).
+  await g3.evaluate(() => window.__glasses.head.calibrate());
+  await burst([0, -90, 0]);  // nod down: beta rate negative
+  await sleep(100);
+  await burst([0, 0, -90]);  // turn right: gamma rate negative
+  await sleep(200);
+  const calib = await g3.evaluate(() => {
+    const h = window.__glasses.head;
+    const fix = h.customFix;
+    const ident = { x: 0, y: 0, z: 0, w: 1 };
+    const dot = fix ? Math.abs(fix.x * ident.x + fix.y * ident.y + fix.z * ident.z + fix.w * ident.w) : 0;
+    return { fixId: h.fixId, fix: fix && fix.toArray(), degFromUpright: fix ? 2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI : null, calibrating: !!h.calib };
+  });
+  console.log('glasses calib', calib);
+  if (calib.fixId !== 'calibrated') errors.push(`glasses: calibration did not finish: ${JSON.stringify(calib)}`);
+  else if (!(calib.degFromUpright < 5)) errors.push(`glasses: calibration should reproduce the upright preset, got ${calib.degFromUpright} deg off`);
   await g3.close();
 
   // Without sensor permission the app must still run, on demo motion.
