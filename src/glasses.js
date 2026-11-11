@@ -41,7 +41,7 @@ function loadSettings() {
 function saveSettings(s) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage may be unavailable */ }
 }
-const settings = Object.assign({ mode: 'world', content: 'workspace', axes: { up: 'auto', right: '+X' }, hud: false, motion: 'gyro' }, loadSettings());
+const settings = Object.assign({ mode: 'world', content: 'workspace', axes: { up: '+Y', right: '+X' }, hud: false, motion: 'sensor' }, loadSettings());
 
 const params = {
   mode: MODE_ORDER.includes(settings.mode) ? settings.mode : 'world',

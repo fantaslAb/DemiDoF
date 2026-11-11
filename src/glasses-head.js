@@ -14,10 +14,11 @@ import { DEG, quatFromYPR, yprFromQuat, clamp } from './math.js';
  * Frames. Raw sensor values are in the W3C device frame D (X right, Y top, Z out of the
  * screen). Orientation events and the integrated gyro both give q_WD: D → Earth frame W
  * (X east, Y north, Z up). `_qScreen` relabels W to the three.js world (Y up, -Z forward).
- * `fix` maps the camera's local axes into D and decides which sensor axis is the wearer's
- * yaw, pitch and roll. The sensor frame inside the glasses is not documented, so `axes`
- * lets the wearer pick which device axis points UP and which points RIGHT; UP can also
- * be taken from gravity when the head is recentred ('auto').
+ * For orientation events the forward gaze is the device's -Z axis (confirmed on the glasses
+ * by luke-hurd/rbm-display-head-gestures-js); yaw and pitch are taken from that vector and
+ * roll is dropped, which sidesteps the Euler flips near β = 90°. For the gyro path `fix`
+ * maps the camera's local axes into D: `axes` picks which device axis points UP and which
+ * points RIGHT (defaults +Y / +X, the same frame); UP can also come from gravity ('auto').
  */
 
 const _q = new THREE.Quaternion();
@@ -56,11 +57,12 @@ export class GlassesHead {
     this.preferGyro = false; // in 'sensor': integrate the gyroscope even when orientation events exist
     this.smoothing = 0.045;  // seconds; time constant of the pose filter (0 = off)
 
-    // Which device axes are the wearer's UP and RIGHT. Defaults = an upright phone.
-    this.axes = { up: 'auto', right: '+X' };
+    // Which device axes are the wearer's UP and RIGHT (gyro path only). Defaults = the
+    // documented W3C frame of the glasses: forward is -Z, so up is +Y and right is +X.
+    this.axes = { up: '+Y', right: '+X' };
     this._fix = new THREE.Quaternion();  // camera → device
     this._upMeasured = new THREE.Vector3(0, 1, 0); // last gravity "up" captured at recenter (device frame)
-    this.fixId = 'up:auto right:+X';
+    this.fixId = 'up:+Y right:+X';
 
     // manual (drag) orientation
     this.yaw = 0;
@@ -334,17 +336,26 @@ export class GlassesHead {
   /** Camera orientation in the three.js world, before the yaw offset. */
   _sensorQuat(target) {
     const s = this.sensor;
-    const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
     if (s.source === 'gyro') {
+      const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
       target.copy(_qScreen).multiply(this._qWD);               // three ← W ← D
-    } else {
-      _euler.set(s.beta * DEG, s.alpha * DEG, -s.gamma * DEG, 'YXZ');
-      target.setFromEuler(_euler);                              // = _qScreen ⊗ q_WD ⊗ _qScreen⁻¹
-      target.multiply(_qScreen);                                // three ← D
+      target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG)); // screen rotation (phones)
+      target.multiply(this._fix);                                 // D ← camera
+      return target;
     }
-    target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG)); // screen rotation (phones)
-    target.multiply(this._fix);                                 // D ← camera
-    return target;
+    // Orientation events: use only the forward gaze vector f = Rz(α)·Rx(β)·Ry(γ)·[0,0,-1]
+    // (the device's -Z axis, which is where the wearer looks on Meta Display Glasses, as
+    // confirmed on-device by luke-hurd/rbm-display-head-gestures-js). Yaw and pitch come
+    // from f, roll is dropped: the raw Euler angles flip together near β = 90°, and the
+    // forward vector stays continuous where a full-attitude quaternion would jump.
+    const a = s.alpha * DEG, b = s.beta * DEG, g = s.gamma * DEG;
+    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+    const fx = -(ca * sg + sa * sb * cg);  // east
+    const fy = ca * sb * cg - sa * sg;     // north
+    const fz = -(cb * cg);                 // up
+    const heading = Math.atan2(fx, fy);    // clockwise from north: turning right increases it
+    const pitch = Math.atan2(fz, Math.hypot(fx, fy));
+    return quatFromYPR(target, -heading / DEG, pitch / DEG, 0);
   }
 
   update(dt) {
