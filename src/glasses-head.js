@@ -38,14 +38,20 @@ const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90
 
 const rx = (deg) => new THREE.Quaternion().setFromAxisAngle(_xee, deg * DEG);
 const ry = (deg) => new THREE.Quaternion().setFromAxisAngle(_yee, deg * DEG);
+const rz = (deg) => new THREE.Quaternion().setFromAxisAngle(_zee, deg * DEG);
 
+/**
+ * Preset camera→device rotations. The glasses reported pitch and yaw swapped with
+ * 'upright', which means the sensor sits rotated about the screen normal: 'rot+90' and
+ * 'rot-90' are the two candidates for that; 'rot180' and 'flipped' cover the sign flips.
+ */
 export const FRAMES = [
   { id: 'upright', label: 'Upright · screen faces wearer', fix: new THREE.Quaternion() },
-  { id: 'upright-flipped', label: 'Upright · screen faces away', fix: ry(180) },
+  { id: 'rot+90', label: 'Rotated +90° about the screen normal', fix: rz(90) },
+  { id: 'rot-90', label: 'Rotated −90° about the screen normal', fix: rz(-90) },
+  { id: 'rot180', label: 'Rotated 180° about the screen normal', fix: rz(180) },
+  { id: 'flipped', label: 'Upright · screen faces away', fix: ry(180) },
   { id: 'flat-forward', label: 'Flat · top edge forward', fix: rx(90) },
-  { id: 'flat-back', label: 'Flat · top edge backward', fix: rx(90).multiply(ry(180)) },
-  { id: 'flat-left', label: 'Flat · top edge left', fix: rx(90).multiply(ry(90)) },
-  { id: 'flat-right', label: 'Flat · top edge right', fix: rx(90).multiply(ry(-90)) },
 ];
 
 /** Seconds of silence after which orientation events are considered gone. */

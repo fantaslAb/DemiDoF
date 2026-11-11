@@ -226,14 +226,16 @@ $('b-motion').addEventListener('click', () => {
   if (autoDemo) { head.disableSensor(); return setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor'); }
   setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(motionChoice) + 1) % MOTION_ORDER.length]);
 });
+// Axes button: steps through the presets (each applies at once), then offers calibration.
+//   Preset 1 → … → Preset N → Calibrate (nod down, turn right) → Calibrated → Preset 1 → …
 $('b-frame').addEventListener('click', () => {
   if (head.calib) { head.cancelCalibration(); setFrameLabel(); toast('Axes calibration cancelled'); return; }
-  if (head.calibrate()) return; // the onCalib hook takes over
-  // No gyroscope (desktop, simulator): fall back to cycling the presets.
-  head.nextFrame();
+  const atLastPreset = !head.customFix && head.frameIndex === FRAMES.length - 1;
+  if (atLastPreset && head.calibrate()) return; // the onCalib hook takes over
+  head.setFrame(head.customFix || atLastPreset ? 0 : head.frameIndex + 1);
   setFrameLabel();
   persist();
-  toast(`Sensor axes: ${FRAMES[head.frameIndex].label}`);
+  toast(`Axes ${head.frameIndex + 1}/${FRAMES.length}: ${FRAMES[head.frameIndex].label}`, 3000);
   rlog.log('axes', { index: head.frameIndex, id: head.fixId });
 });
 
