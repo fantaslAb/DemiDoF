@@ -186,22 +186,23 @@ try {
   if (gyro.motion !== 'sensor' || gyro.source !== 'gyro') errors.push(`glasses: gyro fallback not active: ${JSON.stringify(gyro)}`);
   if (!(gyro.offset > 5)) errors.push(`glasses: gyro integration produced no rotation (offset ${gyro.offset})`);
 
-  // Axes calibration: nod down (about -X of the upright device), then turn right (about -Y).
-  await g3.evaluate(() => window.__glasses.head.calibrate());
-  await burst([0, -90, 0]);  // nod down: beta rate negative
-  await sleep(100);
-  await burst([0, 0, -90]);  // turn right: gamma rate negative
-  await sleep(200);
-  const calib = await g3.evaluate(() => {
+  // Axes choice: up +Y / right +X is the upright phone (fix = identity); up +X / right -Y swaps the roles.
+  const axes = await g3.evaluate(() => {
     const h = window.__glasses.head;
-    const fix = h.customFix;
-    const ident = { x: 0, y: 0, z: 0, w: 1 };
-    const dot = fix ? Math.abs(fix.x * ident.x + fix.y * ident.y + fix.z * ident.z + fix.w * ident.w) : 0;
-    return { fixId: h.fixId, fix: fix && fix.toArray(), degFromUpright: fix ? 2 * Math.acos(Math.min(1, dot)) * 180 / Math.PI : null, calibrating: !!h.calib };
+    const angle = (q) => 2 * Math.acos(Math.min(1, Math.abs(q.w))) * 180 / Math.PI;
+    h.setAxes('+Y', '+X');
+    const ident = angle(h.fix);
+    h.setAxes('+X', '-Y');
+    const swapped = angle(h.fix);
+    const conflict = (h.setAxes('+X', '+X'), h.axesConflict());
+    h.setAxes('auto', '+X');
+    return { ident, swapped, conflict, fixId: h.fixId };
   });
-  console.log('glasses calib', calib);
-  if (calib.fixId !== 'calibrated') errors.push(`glasses: calibration did not finish: ${JSON.stringify(calib)}`);
-  else if (!(calib.degFromUpright < 5)) errors.push(`glasses: calibration should reproduce the upright preset, got ${calib.degFromUpright} deg off`);
+  console.log('glasses axes', axes);
+  if (!(axes.ident < 0.01)) errors.push(`glasses: up +Y / right +X should be the identity fix, got ${axes.ident} deg`);
+  if (!(axes.swapped > 80)) errors.push(`glasses: up +X / right -Y should rotate the frame, got ${axes.swapped} deg`);
+  if (!axes.conflict) errors.push('glasses: parallel up/right axes should be reported as a conflict');
+  if (!/up:auto\(\+Y\)/.test(axes.fixId)) errors.push(`glasses: auto up should read +Y from the synthetic gravity, got ${axes.fixId}`);
   await g3.close();
 
   // Without sensor permission the app must still run, on demo motion.

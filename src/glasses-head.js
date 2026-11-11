@@ -14,10 +14,10 @@ import { DEG, quatFromYPR, yprFromQuat, clamp } from './math.js';
  * Frames. Raw sensor values are in the W3C device frame D (X right, Y top, Z out of the
  * screen). Orientation events and the integrated gyro both give q_WD: D → Earth frame W
  * (X east, Y north, Z up). `_qScreen` relabels W to the three.js world (Y up, -Z forward).
- * `fix` maps the camera's local axes into D: it is what decides which sensor axis is the
- * wearer's yaw, pitch and roll. The sensor frame inside the glasses is not documented, so
- * `fix` either comes from a preset in `FRAMES` or from `calibrate()`, which measures the
- * device axes of a nod and a head turn.
+ * `fix` maps the camera's local axes into D and decides which sensor axis is the wearer's
+ * yaw, pitch and roll. The sensor frame inside the glasses is not documented, so `axes`
+ * lets the wearer pick which device axis points UP and which points RIGHT; UP can also
+ * be taken from gravity when the head is recentred ('auto').
  */
 
 const _q = new THREE.Quaternion();
@@ -31,35 +31,20 @@ const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _m = new THREE.Matrix4();
 const _zee = new THREE.Vector3(0, 0, 1);
-const _xee = new THREE.Vector3(1, 0, 0);
-const _yee = new THREE.Vector3(0, 1, 0);
 const _q0 = new THREE.Quaternion();
 const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90° about X: Earth (Z up) → three.js (Y up)
 
-const rx = (deg) => new THREE.Quaternion().setFromAxisAngle(_xee, deg * DEG);
-const ry = (deg) => new THREE.Quaternion().setFromAxisAngle(_yee, deg * DEG);
-const rz = (deg) => new THREE.Quaternion().setFromAxisAngle(_zee, deg * DEG);
-
-/**
- * Preset camera→device rotations. The glasses reported pitch and yaw swapped with
- * 'upright', which means the sensor sits rotated about the screen normal: 'rot+90' and
- * 'rot-90' are the two candidates for that; 'rot180' and 'flipped' cover the sign flips.
- */
-export const FRAMES = [
-  { id: 'upright', label: 'Upright · screen faces wearer', fix: new THREE.Quaternion() },
-  { id: 'rot+90', label: 'Rotated +90° about the screen normal', fix: rz(90) },
-  { id: 'rot-90', label: 'Rotated −90° about the screen normal', fix: rz(-90) },
-  { id: 'rot180', label: 'Rotated 180° about the screen normal', fix: rz(180) },
-  { id: 'flipped', label: 'Upright · screen faces away', fix: ry(180) },
-  { id: 'flat-forward', label: 'Flat · top edge forward', fix: rx(90) },
-];
+/** Device-axis choices for the UP and RIGHT directions, in the W3C device frame. */
+export const AXIS_VECTORS = {
+  '+X': new THREE.Vector3(1, 0, 0), '-X': new THREE.Vector3(-1, 0, 0),
+  '+Y': new THREE.Vector3(0, 1, 0), '-Y': new THREE.Vector3(0, -1, 0),
+  '+Z': new THREE.Vector3(0, 0, 1), '-Z': new THREE.Vector3(0, 0, -1),
+};
+export const AXIS_NAMES = Object.keys(AXIS_VECTORS);
+export const UP_CHOICES = ['auto', ...AXIS_NAMES];
 
 /** Seconds of silence after which orientation events are considered gone. */
 const ORIENT_STALE_S = 1.0;
-/** Rotation (degrees) the wearer must perform for each calibration step. */
-const CALIB_STEP_DEG = 25;
-/** Seconds allowed per calibration step. */
-const CALIB_STEP_S = 8;
 /** Per-sample gain of the gravity correction on the integrated gyro (≈ 4 s time constant at 50 Hz). */
 const GRAVITY_GAIN = 0.005;
 
@@ -69,9 +54,13 @@ export class GlassesHead {
     this.quaternion = new THREE.Quaternion();
     this.motion = 'manual'; // 'sensor' | 'demo' | 'manual'
     this.preferGyro = false; // in 'sensor': integrate the gyroscope even when orientation events exist
-    this.frameIndex = 0;
-    this.customFix = null;   // calibrated camera→device rotation; overrides FRAMES when set
     this.smoothing = 0.045;  // seconds; time constant of the pose filter (0 = off)
+
+    // Which device axes are the wearer's UP and RIGHT. Defaults = an upright phone.
+    this.axes = { up: 'auto', right: '+X' };
+    this._fix = new THREE.Quaternion();  // camera → device
+    this._upMeasured = new THREE.Vector3(0, 1, 0); // last gravity "up" captured at recenter (device frame)
+    this.fixId = 'up:auto right:+X';
 
     // manual (drag) orientation
     this.yaw = 0;
@@ -97,12 +86,11 @@ export class GlassesHead {
     this._qWD = new THREE.Quaternion(); // integrated gyro: device → Earth
     this._gyroSeeded = false;
     this._target = new THREE.Quaternion();
-    this.calib = null;
     this.onReset = null;
-    this.onCalib = null; // (step, info) => void; step 1 = nod down, 2 = turn right, 'done', 'fail'
     this._time = 0;
     this._drag = null;
     this._bind();
+    this._rebuildFix();
   }
 
   _bind() {
@@ -124,13 +112,49 @@ export class GlassesHead {
     el.addEventListener('pointercancel', up);
   }
 
-  get frame() { return FRAMES[this.frameIndex]; }
-  /** The camera→device rotation in use: the calibration if there is one, else the preset. */
-  get fix() { return this.customFix || this.frame.fix; }
-  get fixId() { return this.customFix ? 'calibrated' : this.frame.id; }
-  setFrame(i) { this.frameIndex = ((i % FRAMES.length) + FRAMES.length) % FRAMES.length; this.customFix = null; this.resetHead(); }
-  nextFrame() { this.setFrame(this.frameIndex + 1); }
-  setCustomFix(q) { this.customFix = q ? new THREE.Quaternion().copy(q).normalize() : null; this.resetHead(); }
+  // ---------------------------------------------------------------------------
+  // Axes
+
+  get fix() { return this._fix; }
+
+  /** Set which device axes are UP ('auto' = gravity at recenter) and RIGHT, then recenter. */
+  setAxes(up, right) {
+    if (up !== undefined && UP_CHOICES.includes(up)) this.axes.up = up;
+    if (right !== undefined && AXIS_NAMES.includes(right)) this.axes.right = right;
+    this._rebuildFix();
+    this.resetHead();
+  }
+
+  /** True when the chosen UP and RIGHT are parallel, which cannot form a frame. */
+  axesConflict() {
+    const up = this._upVector(_v2);
+    return Math.abs(up.dot(AXIS_VECTORS[this.axes.right])) > 0.9;
+  }
+
+  _upVector(target) {
+    if (this.axes.up === 'auto') return target.copy(this._upMeasured);
+    return target.copy(AXIS_VECTORS[this.axes.up]);
+  }
+
+  /** fix = basis [X_cam = right, Y_cam = up, Z_cam = right × up] expressed in D. */
+  _rebuildFix() {
+    const Y = this._upVector(new THREE.Vector3()).normalize();
+    const X = AXIS_VECTORS[this.axes.right].clone();
+    X.addScaledVector(Y, -Y.dot(X));
+    if (X.lengthSq() < 0.05) {
+      // Parallel choice: fall back to any axis perpendicular to up so the app keeps running.
+      X.copy(Math.abs(Y.x) < 0.9 ? AXIS_VECTORS['+X'] : AXIS_VECTORS['+Y']);
+      X.addScaledVector(Y, -Y.dot(X));
+    }
+    X.normalize();
+    const Z = new THREE.Vector3().crossVectors(X, Y);
+    _m.makeBasis(X, Y, Z);
+    this._fix.setFromRotationMatrix(_m);
+    this.fixId = `up:${this.axes.up}${this.axes.up === 'auto' ? `(${fmtAxis(Y)})` : ''} right:${this.axes.right}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sensors
 
   /** True when any motion-sensor API exists at all. */
   static sensorAvailable() {
@@ -216,7 +240,6 @@ export class GlassesHead {
       s.motionEvents++;
       if (hasG) { s.hasGravity = true; s.grav.x = g.x; s.grav.y = g.y; s.grav.z = g.z; }
       if (hasRR) { s.hasGyro = true; s.rr.a = rr.alpha; s.rr.b = rr.beta; s.rr.g = rr.gamma; }
-      if (hasRR && this.calib) this._calibStep(dt, now);
       // Gyro integration is used while orientation events are absent, or when preferred.
       const orientFresh = s.lastAt && (now - s.lastAt) / 1000 < ORIENT_STALE_S;
       if ((orientFresh && !this.preferGyro) || !hasRR) return;
@@ -290,56 +313,13 @@ export class GlassesHead {
   }
 
   // ---------------------------------------------------------------------------
-  // Calibration: which device axes are the wearer's pitch and yaw
 
-  /**
-   * Start the two-step calibration. Step 1: the wearer nods DOWN; step 2: the wearer turns
-   * RIGHT. Each step integrates rotationRate until CALIB_STEP_DEG of rotation has happened;
-   * the two rotation axes in D define the camera's X (right) and Y (up) axes.
-   */
-  calibrate() {
-    if (!this.sensor.listening || !this.sensor.hasGyro) return false;
-    this.calib = { step: 1, vec: new THREE.Vector3(), t0: performance.now(), down: null };
-    if (this.onCalib) this.onCalib(1);
-    return true;
-  }
-  cancelCalibration() { this.calib = null; }
-
-  _calibStep(dt, now) {
-    const c = this.calib;
-    if ((now - c.t0) / 1000 > CALIB_STEP_S) {
-      this.calib = null;
-      if (this.onCalib) this.onCalib('fail', { step: c.step, deg: c.vec.length() / DEG });
-      return;
-    }
-    if (!(dt > 0)) return;
-    c.vec.addScaledVector(this._omega(_v), dt);
-    if (c.vec.length() < CALIB_STEP_DEG * DEG) return;
-    const axis = c.vec.clone().normalize();
-    if (c.step === 1) {
-      c.down = axis;
-      c.step = 2; c.vec.set(0, 0, 0); c.t0 = now;
-      if (this.onCalib) this.onCalib(2);
-      return;
-    }
-    // Looking down is rotation about -X_cam; turning right is rotation about -Y_cam.
-    const X = c.down.clone().negate();
-    const Y = axis.clone().negate();
-    Y.addScaledVector(X, -X.dot(Y));
-    if (Y.lengthSq() < 0.1) { this.calib = null; if (this.onCalib) this.onCalib('fail', { step: 2, reason: 'axes too close' }); return; }
-    Y.normalize();
-    const Z = new THREE.Vector3().crossVectors(X, Y);
-    _m.makeBasis(X, Y, Z); // columns: camera axes expressed in D  ⇒  camera → D
-    const fix = new THREE.Quaternion().setFromRotationMatrix(_m);
-    this.calib = null;
-    this.setCustomFix(fix);
-    if (this.onCalib) this.onCalib('done', { fix: fix.toArray(), down: c.down.toArray(), right: axis.toArray() });
-  }
-
-  // ---------------------------------------------------------------------------
-
-  /** Make the current heading the new forward direction. */
+  /** Make the current heading the new forward direction (and, with up:auto, capture gravity as UP). */
   resetHead() {
+    if (this.axes.up === 'auto' && this.sensor.hasGravity) {
+      this._upD(this._upMeasured);
+      this._rebuildFix();
+    }
     if (this.motion === 'sensor' && this.sensor.has) {
       this._sensorQuat(_q);
       this.sensor.yawOffset = -yprFromQuat(_q).yaw;
@@ -363,7 +343,7 @@ export class GlassesHead {
       target.multiply(_qScreen);                                // three ← D
     }
     target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG)); // screen rotation (phones)
-    target.multiply(this.fix);                                  // D ← camera
+    target.multiply(this._fix);                                 // D ← camera
     return target;
   }
 
@@ -387,4 +367,14 @@ export class GlassesHead {
     else this.quaternion.slerp(t, 1 - Math.exp(-dt / this.smoothing));
     return this.quaternion;
   }
+}
+
+/** Nearest signed device axis of a vector, for the readout (e.g. "+Y"). */
+function fmtAxis(v) {
+  let best = '+X', bestDot = -2;
+  for (const name of AXIS_NAMES) {
+    const d = v.dot(AXIS_VECTORS[name]);
+    if (d > bestDot) { bestDot = d; best = name; }
+  }
+  return best;
 }

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { ContentLayer } from './content.js';
 import { DisplayModel } from './display.js';
-import { GlassesHead, FRAMES } from './glasses-head.js';
+import { GlassesHead, AXIS_NAMES, UP_CHOICES } from './glasses-head.js';
 import { RemoteLog } from './glasses-log.js';
 import { yprFromQuat, fmtDeg, angleBetween } from './math.js';
 
@@ -41,7 +41,7 @@ function loadSettings() {
 function saveSettings(s) {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage may be unavailable */ }
 }
-const settings = Object.assign({ mode: 'world', content: 'workspace', frame: 0, fix: null, hud: false, motion: 'gyro' }, loadSettings());
+const settings = Object.assign({ mode: 'world', content: 'workspace', axes: { up: 'auto', right: '+X' }, hud: false, motion: 'gyro' }, loadSettings());
 
 const params = {
   mode: MODE_ORDER.includes(settings.mode) ? settings.mode : 'world',
@@ -81,18 +81,19 @@ const content = new ContentLayer();
 content.setPreset(params.content);
 const display = new DisplayModel(params);
 const head = new GlassesHead(canvas);
-head.frameIndex = Number.isInteger(settings.frame) ? settings.frame % FRAMES.length : 0;
-if (Array.isArray(settings.fix) && settings.fix.length === 4) head.customFix = new THREE.Quaternion().fromArray(settings.fix).normalize();
 head.onReset = () => display.recenter();
 head.motion = 'manual';
+if (settings.axes && typeof settings.axes === 'object') head.setAxes(settings.axes.up, settings.axes.right);
 
 // ---------------------------------------------------------------------------
 // UI helpers
 
 let started = false;
 const bar = $('bar');
+const barAxes = $('bar-axes');
 const hud = $('hud');
-const buttons = [...bar.querySelectorAll('button')];
+let activeBar = bar;
+let buttons = [...bar.querySelectorAll('button')];
 let focusIndex = 0;
 
 function setLabel(id, text) { $(id).querySelector('b').textContent = text; }
@@ -100,8 +101,17 @@ function focusButton(i) {
   focusIndex = (i + buttons.length) % buttons.length;
   buttons[focusIndex].focus({ preventScroll: true });
 }
-function showBar(on) { bar.classList.toggle('hidden', !on); }
-function barVisible() { return !bar.classList.contains('hidden'); }
+/** Switch between the main bar and the axes bar; focus the first button of the new one. */
+function setBar(el) {
+  if (activeBar === el) return;
+  activeBar.classList.add('hidden');
+  activeBar = el;
+  buttons = [...el.querySelectorAll('button')];
+  el.classList.remove('hidden');
+  focusButton(0);
+}
+function showBar(on) { activeBar.classList.toggle('hidden', !on); }
+function barVisible() { return !activeBar.classList.contains('hidden'); }
 
 let toastTimer = 0;
 function toast(msg, ms = 2400) {
@@ -115,8 +125,7 @@ function toast(msg, ms = 2400) {
 function persist() {
   settings.mode = params.mode;
   settings.content = params.content;
-  settings.frame = head.frameIndex;
-  settings.fix = head.customFix ? head.customFix.toArray() : null;
+  settings.axes = { ...head.axes };
   settings.hud = !hud.classList.contains('hidden');
   if (started) settings.motion = motionChoice; // before Start the head is still in its initial state
   saveSettings(settings);
@@ -148,18 +157,21 @@ function setHud(on) {
   setLabel('b-hud', on ? 'On' : 'Off');
   persist();
 }
-function setFrameLabel() {
-  setLabel('b-frame', head.customFix ? 'Calibrated' : `Preset ${head.frameIndex + 1}`);
+function setAxesLabels() {
+  setLabel('b-frame', `${head.axes.up} / ${head.axes.right}`);
+  setLabel('b-ax-up', head.axes.up);
+  setLabel('b-ax-right', head.axes.right);
 }
-
-// Axes calibration: nod down, then turn right. Guides the wearer through toasts.
-head.onCalib = (step, info) => {
-  if (step === 1) { setLabel('b-frame', 'Nod DOWN'); toast('Axes: nod your head DOWN', 8000); }
-  else if (step === 2) { setLabel('b-frame', 'Turn RIGHT'); toast('Axes: now turn your head RIGHT', 8000); }
-  else if (step === 'done') { setFrameLabel(); toast('Axes calibrated. Look ahead and press Center.', 4000); persist(); }
-  else { setFrameLabel(); toast('Axes calibration timed out. Press Axes to retry.', 4000); }
-  rlog.log('calib', { step, ...(info || {}) });
-};
+function cycleAxis(which) {
+  const list = which === 'up' ? UP_CHOICES : AXIS_NAMES;
+  const next = list[(list.indexOf(head.axes[which]) + 1) % list.length];
+  if (which === 'up') head.setAxes(next, undefined); else head.setAxes(undefined, next);
+  setAxesLabels();
+  persist();
+  rlog.log('axes', { ...head.axes, fixId: head.fixId });
+  if (head.axesConflict()) toast(`Up ${head.axes.up} and right ${head.axes.right} are the same axis. Pick another.`, 3000);
+  else toast(`Up ${head.axes.up} · right ${head.axes.right}. Look ahead, press Center, then turn your head.`, 3000);
+}
 
 let sensorWatchdog = 0;
 let autoDemo = false;         // demo motion chosen by the watchdog, not by the wearer
@@ -226,18 +238,12 @@ $('b-motion').addEventListener('click', () => {
   if (autoDemo) { head.disableSensor(); return setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor'); }
   setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(motionChoice) + 1) % MOTION_ORDER.length]);
 });
-// Axes button: steps through the presets (each applies at once), then offers calibration.
-//   Preset 1 → … → Preset N → Calibrate (nod down, turn right) → Calibrated → Preset 1 → …
-$('b-frame').addEventListener('click', () => {
-  if (head.calib) { head.cancelCalibration(); setFrameLabel(); toast('Axes calibration cancelled'); return; }
-  const atLastPreset = !head.customFix && head.frameIndex === FRAMES.length - 1;
-  if (atLastPreset && head.calibrate()) return; // the onCalib hook takes over
-  head.setFrame(head.customFix || atLastPreset ? 0 : head.frameIndex + 1);
-  setFrameLabel();
-  persist();
-  toast(`Axes ${head.frameIndex + 1}/${FRAMES.length}: ${FRAMES[head.frameIndex].label}`, 3000);
-  rlog.log('axes', { index: head.frameIndex, id: head.fixId });
-});
+// Axes: a second bar where the wearer picks which device axis is UP and which is RIGHT.
+$('b-frame').addEventListener('click', () => { setBar(barAxes); toast('Pick the device axis that points UP and the one that points RIGHT', 3200); });
+$('b-ax-up').addEventListener('click', () => cycleAxis('up'));
+$('b-ax-right').addEventListener('click', () => cycleAxis('right'));
+$('b-ax-center').addEventListener('click', () => { head.resetHead(); toast('Recentred: this way is forward'); rlog.log('recenter', rawSample()); });
+$('b-ax-back').addEventListener('click', () => setBar(bar));
 
 /** Raw sensor state plus the resulting head pose, for the remote log. */
 function rawSample() {
@@ -383,7 +389,7 @@ function frame() {
 
 setLabel('b-mode', MODE_BTN[params.mode]);
 setLabel('b-content', CONTENT_BTN[params.content]);
-setFrameLabel();
+setAxesLabels();
 setHud(!!settings.hud);
 display.recenter();
 renderer.setAnimationLoop(frame);
