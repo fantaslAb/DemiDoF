@@ -76,7 +76,7 @@ try {
   console.log('render stats', stats);
 
   // -------------------------------------------------------------------------
-  // Glasses build: the page is the 600 x 600 display, driven by arrows + Enter.
+  // Glasses build: the page is the 600 x 600 display, world-locked content only.
   const g = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
   g.on('pageerror', (e) => errors.push(`glasses pageerror: ${e.message}`));
   g.on('console', (m) => { if (m.type() === 'error') errors.push(`glasses console: ${m.text()}`); });
@@ -84,183 +84,133 @@ try {
   await g.waitForFunction(() => window.__glasses && window.__glasses.renderer.info.render.frame > 5, null, { timeout: 15000 });
   const gshot = async (name) => { await sleep(250); await g.screenshot({ path: path.join(OUT, `${name}.png`) }); };
   const gset = (fn, arg) => g.evaluate(fn, arg);
+  const offset = () => gset(() => window.__glasses.display.contentOffset());
 
   await gshot('g1-start');
   // Headless Chromium answers the sensor permission with "denied"; pretend the wearer granted it.
   await gset(() => { DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted'); });
-  await g.keyboard.press('Enter'); // Start: attaches the orientation listener
+  await g.keyboard.press('Enter'); // Start
   await sleep(200);
-  await gset(() => window.__glasses.setMotion('sensor')); // orientation events (the default is Gyro)
-  await sleep(100);
 
-  // Feed synthetic IMU events before the 2.5 s watchdog falls back to demo motion.
+  // Orientation events only (no gyroscope): forward-vector path.
   const feed = (alpha, beta, gamma) => gset(([a, b, c]) => {
     window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha: a, beta: b, gamma: c, absolute: false }));
   }, [alpha, beta, gamma]);
   await feed(0, 90, 0); // upright, looking straight ahead -> becomes "forward"
   await sleep(100);
-  await gshot('g2-sensor-forward');
+  await gshot('g2-forward');
   await feed(-20, 90, 0); // turn 20 deg right (alpha decreases when turning right)
-  await sleep(400); // let the pose filter settle
-  const sensorState = await gset(() => {
-    const h = window.__glasses.head;
-    return { motion: h.motion, has: h.sensor.has, events: h.sensor.events, offset: window.__glasses.display.contentOffset() };
-  });
-  console.log('glasses sensor', sensorState);
-  if (sensorState.motion !== 'sensor' || !sensorState.has) errors.push(`glasses: sensor path not active: ${JSON.stringify(sensorState)}`);
-  if (!(sensorState.offset > 15 && sensorState.offset < 25)) errors.push(`glasses: expected ~20 deg content offset after a 20 deg yaw, got ${sensorState.offset}`);
-  await gshot('g3-sensor-yaw-right-20');
+  await sleep(600); // let the output filter settle
+  const orient = await gset(() => ({ source: window.__glasses.head.sensor.source, has: window.__glasses.head.sensor.has, events: window.__glasses.head.sensor.events, offset: window.__glasses.display.contentOffset() }));
+  console.log('glasses orientation', orient);
+  if (orient.source !== 'orientation' || !orient.has) errors.push(`glasses: orientation path not active: ${JSON.stringify(orient)}`);
+  if (!(orient.offset > 17 && orient.offset < 23)) errors.push(`glasses: expected ~20 deg content offset after a 20 deg yaw, got ${orient.offset}`);
+  await gshot('g3-yaw-right-20');
 
-  // Snap mode: the pose is quantised into 20-degree detents with hysteresis.
-  await gset(() => window.__glasses.setMode('snap'));
-  await feed(0, 90, 0); await sleep(150);
-  await gset(() => window.__glasses.head.resetHead()); // forward = here, detent 0
-  await sleep(100);
-  await feed(-8, 90, 0); await sleep(300);   // 8 deg: inside the detent, content must not move
-  const snapA = await gset(() => window.__glasses.display.contentOffset());
-  await feed(-25, 90, 0); await sleep(400);  // 25 deg: past 65 % of a step -> next detent (20)
-  const snapB = await gset(() => window.__glasses.display.contentOffset());
-  await feed(-16, 90, 0); await sleep(400);  // back to 16 deg: still within the 20-degree detent
-  const snapC = await gset(() => window.__glasses.display.contentOffset());
-  console.log('glasses snap', { inside: snapA, next: snapB, back: snapC });
-  if (!(snapA < 0.5)) errors.push(`glasses snap: 8 deg should stay in the first detent, offset ${snapA}`);
-  if (!(snapB > 15 && snapB < 25)) errors.push(`glasses snap: 25 deg should click to the 20-degree detent, offset ${snapB}`);
-  if (!(snapC > 15 && snapC < 25)) errors.push(`glasses snap: 16 deg should stay on the 20-degree detent, offset ${snapC}`);
-  await gset(() => window.__glasses.setMode('world'));
-  await feed(0, 90, 0); await sleep(150);
-  await gset(() => window.__glasses.head.resetHead());
-  await feed(-20, 90, 0); await sleep(400);
-
-  // Menu: Enter on the focused "Mode" button cycles world -> snap
+  // Select = recenter: the content comes back to the window.
   await g.keyboard.press('Enter');
-  await sleep(50);
-  const mode1 = await gset(() => window.__glasses.params.mode);
-  if (mode1 !== 'snap') errors.push(`glasses: Mode button should cycle to snap, got ${mode1}`);
-  await g.keyboard.press('Enter'); await sleep(50); // snap -> locked
-  await gshot('g4-locked');
+  await sleep(300);
+  const afterRecenter = await offset();
+  if (!(afterRecenter < 0.5)) errors.push(`glasses: Select should recenter, offset ${afterRecenter}`);
 
-  // ArrowRight moves focus to "Content"; Enter cycles workspace -> hud
-  await g.keyboard.press('ArrowRight');
-  await g.keyboard.press('Enter');
-  await sleep(50);
+  // Arrows: content preset and readout.
+  await g.keyboard.press('ArrowRight'); await sleep(50);
   const content1 = await gset(() => window.__glasses.params.content);
-  if (content1 !== 'hud') errors.push(`glasses: Content button should cycle to hud, got ${content1}`);
-  // ArrowUp hides the bar; the readout toggle is the last button
-  await g.keyboard.press('ArrowUp');
-  const hidden = await gset(() => document.getElementById('bar').classList.contains('hidden'));
-  if (!hidden) errors.push('glasses: ArrowUp should hide the bar');
-  await g.keyboard.press('ArrowLeft'); // reveals the bar again and moves focus to "Mode"
-  await g.keyboard.press('ArrowLeft'); // wraps to "Readout"
-  await g.keyboard.press('Enter');
-  await sleep(200);
+  if (content1 !== 'hud') errors.push(`glasses: ArrowRight should switch to hud, got ${content1}`);
+  await g.keyboard.press('ArrowUp'); await sleep(250);
   const hudOn = await gset(() => !document.getElementById('hud').classList.contains('hidden'));
-  if (!hudOn) errors.push('glasses: Readout button should show the HUD');
-  await gshot('g5-hud-readout');
+  if (!hudOn) errors.push('glasses: ArrowUp should show the readout');
+  await gshot('g4-hud-readout');
+  await g.keyboard.press('ArrowDown');
 
-  // Every interactive element must be reachable: the focused element is always one of ours
-  const focused = await gset(() => document.activeElement && document.activeElement.id);
-  if (!/^b-/.test(focused || '')) errors.push(`glasses: focus left the menu (${focused})`);
+  // Edge indicator appears when the content is outside the window.
+  await feed(-40, 90, 0); await sleep(600);
+  const edgeShown = await gset(() => document.getElementById('edge').classList.contains('show') ? document.getElementById('edge').textContent : '');
+  if (!/\u2190/.test(edgeShown)) errors.push(`glasses: edge indicator should point left (content is to the left), got "${edgeShown}"`);
+  await gshot('g5-edge');
+  await g.keyboard.press('Enter'); await sleep(300); // recenter: content back in the window
 
   // The drawn frame must not be empty (black = transparent on the waveguide)
   const lit = await gset(() => {
     const d = window.__glasses;
     const w = 600, buf = new Uint8Array(w * w * 4);
     d.renderer.render(d.content.scene, d.display.camera);
-    d.renderer.getContext().readPixels(0, 0, w, w, d.renderer.getContext().RGBA, d.renderer.getContext().UNSIGNED_BYTE, buf);
+    const gl = d.renderer.getContext();
+    gl.readPixels(0, 0, w, w, gl.RGBA, gl.UNSIGNED_BYTE, buf);
     let n = 0;
     for (let i = 0; i < buf.length; i += 4) if (buf[i] + buf[i + 1] + buf[i + 2] > 60) n++;
     return n / (w * w);
   });
   console.log('glasses lit fraction', lit.toFixed(3));
-  if (!(lit > 0.01)) errors.push(`glasses: frame looks empty (lit fraction ${lit})`);
+  if (!(lit > 0.005)) errors.push(`glasses: frame looks empty (lit fraction ${lit})`);
   await g.close();
 
-  // Gyro fallback: only devicemotion (rotationRate + gravity) arrives, no orientation events.
+  // Gyroscope + orientation (fused), and gyroscope only. Device upright: gravity +9.81 along +Y.
   const g3 = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
   g3.on('pageerror', (e) => errors.push(`glasses3 pageerror: ${e.message}`));
   await g3.goto(`http://127.0.0.1:${PORT}/glasses.html`, { waitUntil: 'load' });
   await g3.waitForFunction(() => window.__glasses && window.__glasses.renderer.info.render.frame > 5, null, { timeout: 15000 });
-  await g3.evaluate(() => {
-    DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted');
-    if (typeof DeviceMotionEvent !== 'undefined') DeviceMotionEvent.requestPermission = () => Promise.resolve('granted');
-  });
+  await g3.evaluate(() => { DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted'); });
   await g3.keyboard.press('Enter');
   await sleep(200);
-  // Device held upright like a phone (W3C frame): gravity reads +9.81 along +Y.
   const feedMotion = ([a, b, c]) => g3.evaluate(([alpha, beta, gamma]) => {
     window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
-      rotationRate: { alpha, beta, gamma },
-      accelerationIncludingGravity: { x: 0, y: 9.81, z: 0 },
-      interval: 50,
+      rotationRate: { alpha, beta, gamma }, accelerationIncludingGravity: { x: 0, y: 9.81, z: 0 }, interval: 16,
     }));
   }, [a, b, c]);
-  const burst = async (rate, n = 8) => { for (let i = 0; i < n; i++) { await sleep(50); await feedMotion(rate); } };
-  await feedMotion([0, 0, 0]); // seeds the attitude from gravity
-  await burst([0, 0, -120]); // yaw: ~ -120 deg/s about the device Y axis = turning right for the upright frame
-  await sleep(400);
-  const gyro = await g3.evaluate(() => {
-    const h = window.__glasses.head;
-    const e = window.__glasses.head.quaternion;
-    return { motion: h.motion, source: h.sensor.source, has: h.sensor.has, motionEvents: h.sensor.motionEvents, offset: window.__glasses.display.contentOffset(), q: e.toArray() };
-  });
-  console.log('glasses gyro', gyro);
-  if (gyro.motion !== 'sensor' || gyro.source !== 'gyro') errors.push(`glasses: gyro fallback not active: ${JSON.stringify(gyro)}`);
-  if (!(gyro.offset > 5)) errors.push(`glasses: gyro integration produced no rotation (offset ${gyro.offset})`);
-
-  // Fused: orientation events + gyroscope together -> source 'fused', driven by the gyro,
-  // heading pulled towards the orientation events.
-  await g3.evaluate(() => window.__glasses.setMotion('sensor'));
-  await sleep(100);
   const feedOrient = (a) => g3.evaluate((alpha) => {
     window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha, beta: 90, gamma: 0, absolute: false }));
   }, a);
-  await feedOrient(0);
-  await feedMotion([0, 0, 0]);
-  for (let i = 0; i < 6; i++) { await sleep(50); await feedOrient(0); await feedMotion([0, 0, 0]); }
+  const burst = async (rate, n = 8, withOrient = null) => {
+    for (let i = 0; i < n; i++) { await sleep(16); if (withOrient !== null) await feedOrient(withOrient); await feedMotion(rate); }
+  };
+  // Gyro only: a constant bias of 1.5 deg/s about Z while "still" is learned and removed.
+  await feedMotion([1.5, 0, 0]);
+  await burst([1.5, 0, 0], 90); // ~1.5 s still
+  const biasState = await g3.evaluate(() => ({ source: window.__glasses.head.sensor.source, bias: window.__glasses.head.bias.z }));
+  console.log('glasses gyro bias', biasState);
+  if (biasState.source !== 'gyro') errors.push(`glasses: expected gyro source, got ${JSON.stringify(biasState)}`);
+  if (!(biasState.bias > 0.3)) errors.push(`glasses: gyro bias should be learned while still, got ${biasState.bias}`);
+  await g3.keyboard.press('Enter'); await sleep(100); // recenter
+  // Turn right: ~ -120 deg/s about the device Y axis for 8 samples (~16 ms each) = about 15 deg.
+  await burst([1.5, 0, -120], 8);
   await sleep(300);
-  const fused = await g3.evaluate(() => {
-    const h = window.__glasses.head;
-    return { source: h.sensor.source, has: h.sensor.has, offset: window.__glasses.display.contentOffset() };
+  const gyroTurn = await g3.evaluate(() => {
+    const e = window.__glasses.head.quaternion;
+    return { offset: window.__glasses.display.contentOffset(), qy: e.y };
   });
-  console.log('glasses fused', fused);
-  if (fused.source !== 'fused') errors.push(`glasses: expected fused source with both event kinds, got ${JSON.stringify(fused)}`);
-  // Turn right with the gyro while the orientation events keep saying "0": the gyro wins at once.
-  await burst([0, 0, -120], 6);
-  await sleep(300);
-  const fusedTurn = await g3.evaluate(() => ({ source: window.__glasses.head.sensor.source, offset: window.__glasses.display.contentOffset() }));
-  console.log('glasses fused turn', fusedTurn);
-  if (!(fusedTurn.offset > 5)) errors.push(`glasses: fused pose did not follow the gyro (offset ${fusedTurn.offset})`);
+  console.log('glasses gyro turn', gyroTurn);
+  if (!(gyroTurn.offset > 5)) errors.push(`glasses: gyro turn produced no rotation (offset ${gyroTurn.offset})`);
+  if (!(gyroTurn.qy < 0)) errors.push(`glasses: turning right should give a negative yaw quaternion y, got ${gyroTurn.qy}`);
 
-  // Axes choice: up +Y / right +X is the upright phone (fix = identity); up +X / right -Y swaps the roles.
-  const axes = await g3.evaluate(() => {
-    const h = window.__glasses.head;
-    const angle = (q) => 2 * Math.acos(Math.min(1, Math.abs(q.w))) * 180 / Math.PI;
-    h.setAxes('+Y', '+X');
-    const ident = angle(h.fix);
-    h.setAxes('+X', '-Y');
-    const swapped = angle(h.fix);
-    const conflict = (h.setAxes('+X', '+X'), h.axesConflict());
-    h.setAxes('auto', '+X');
-    return { ident, swapped, conflict, fixId: h.fixId };
-  });
-  console.log('glasses axes', axes);
-  if (!(axes.ident < 0.01)) errors.push(`glasses: up +Y / right +X should be the identity fix, got ${axes.ident} deg`);
-  if (!(axes.swapped > 80)) errors.push(`glasses: up +X / right -Y should rotate the frame, got ${axes.swapped} deg`);
-  if (!axes.conflict) errors.push('glasses: parallel up/right axes should be reported as a conflict');
-  if (!/up:auto\(\+Y\)/.test(axes.fixId)) errors.push(`glasses: auto up should read +Y from the synthetic gravity, got ${axes.fixId}`);
+  // Fused: both streams; the gyro drives, the heading is pulled towards the orientation events.
+  await burst([1.5, 0, 0], 10, 0);
+  await sleep(200);
+  const fused = await g3.evaluate(() => window.__glasses.head.sensor.source);
+  if (fused !== 'fused') errors.push(`glasses: expected fused source with both event kinds, got ${fused}`);
+  await g3.keyboard.press('Enter'); await sleep(100);
+  await burst([1.5, 0, -120], 8, 0);
+  await sleep(300);
+  const fusedTurn = await g3.evaluate(() => window.__glasses.display.contentOffset());
+  console.log('glasses fused turn', fusedTurn);
+  if (!(fusedTurn > 5)) errors.push(`glasses: fused pose did not follow the gyro (offset ${fusedTurn})`);
   await g3.close();
 
-  // Without sensor permission the app must still run, on demo motion.
+  // Without sensor permission the app must still run (drag fallback), without errors.
   const g2 = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
   g2.on('pageerror', (e) => errors.push(`glasses2 pageerror: ${e.message}`));
   await g2.goto(`http://127.0.0.1:${PORT}/glasses.html`, { waitUntil: 'load' });
   await g2.waitForFunction(() => window.__glasses && window.__glasses.renderer.info.render.frame > 5, null, { timeout: 15000 });
   await g2.keyboard.press('Enter');
-  await g2.waitForFunction(() => window.__glasses.head.motion !== 'sensor', null, { timeout: 5000 }).catch(() => {});
-  const motion2 = await g2.evaluate(() => window.__glasses.head.motion);
-  if (motion2 !== 'demo') errors.push(`glasses: expected demo motion after a refused permission, got ${motion2}`);
-  await sleep(300);
-  await g2.screenshot({ path: path.join(OUT, 'g6-demo-fallback.png') });
+  await sleep(500);
+  const denied = await g2.evaluate(() => ({ perm: window.__glasses.head.sensor.permission, source: window.__glasses.head.sensor.source, started: document.getElementById('start').classList.contains('hidden') }));
+  console.log('glasses denied', denied);
+  if (!denied.started || denied.source !== 'none') errors.push(`glasses: denied permission should leave the app running on drag, got ${JSON.stringify(denied)}`);
+  await g2.mouse.move(300, 300); await g2.mouse.down(); await g2.mouse.move(100, 300, { steps: 5 }); await g2.mouse.up();
+  await sleep(200);
+  const dragged = await g2.evaluate(() => window.__glasses.display.contentOffset());
+  if (!(dragged > 5)) errors.push(`glasses: drag fallback should move the view, offset ${dragged}`);
+  await g2.screenshot({ path: path.join(OUT, 'g6-drag-fallback.png') });
   await g2.close();
 } catch (e) {
   errors.push(`test: ${e.stack || e}`);

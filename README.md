@@ -64,8 +64,9 @@ head quaternion ──×── placement offset ──► display camera (fov 20
 * `src/head.js` — pointer, keyboard, DeviceOrientation and demo motion → head quaternion.
 * `src/world.js` — procedural room: gradient sky, graded ground grid, compass ring every 15°, landmarks.
 * `src/xr.js` — WebXR session; the overlay is put on layer 2 so only the right eye sees it.
-* `src/glasses.js`, `src/glasses-head.js` — the on-device Web App (`glasses.html`): IMU head input with
-  selectable sensor-frame corrections, arrow-key menu, direct 600 × 600 render.
+* `src/glasses.js`, `src/glasses-head.js`, `src/glasses-log.js` — the on-device Web App
+  (`glasses.html`): IMU head tracker (gyro + gravity + compass fusion, prediction, adaptive filter),
+  world-locked render straight to the 600 × 600 canvas, remote log.
 * `src/main.js` — frame loop: head → display → content → render target → wearer view → preview.
 
 Anchoring modes, in terms of the content anchor `A` and the display camera `D`:
@@ -90,40 +91,51 @@ Anchoring modes, in terms of the content anchor `A` and the display camera `D`:
 
 `glasses.html` is DemiDoF running **on the Ray-Ban Display itself**, as a Meta Web App (plain HTML +
 JavaScript at a public HTTPS URL, added to the glasses in Developer Mode). The page *is* the
-600 × 600 display: no wearer's view, no room, no sliders. The content layer is rendered straight to
-the canvas through the display camera, the head pose comes from the glasses' IMU through
-`DeviceOrientationEvent`, and a six-button bar is driven with the arrows + Select that the glasses
-deliver.
+600 × 600 display: no wearer's view, no room, no sliders, one anchoring mode: **world-locked**.
+The content layer is rendered straight to the canvas through the display camera and the head pose
+comes from the glasses' IMU.
 
-| Button | What it does |
+| Input | What it does |
 | --- | --- |
-| **Mode** | cycles World-locked → Head-locked → Lazy follow → Horizon-level |
-| **Content** | cycles Cards (workspace across 120°) → HUD → angular Grid |
-| **Recenter** | the way you are looking becomes "forward" and the content is centred in the display |
-| **Head** | Sensor (IMU) → Demo motion (scripted) → Drag (Neural Band / pointer only) |
-| **Axes** | cycles six sensor-frame corrections (see below) |
-| **Readout** | overlays mode, head yaw / pitch / roll, content offset and fps |
+| **Select / tap** | recenter: the way you look becomes "forward" and the content is centred in the display |
+| `←` `→` | content preset: Cards (workspace across 120°) → HUD → angular Grid |
+| `↑` `↓` | readout on / off (source, permission, raw sensor values, bias, filter, fps) |
 
-`←` `→` move between buttons, Select activates, `↑` hides the bar, `↓` or any arrow brings it back.
-Black pixels are transparent on the waveguide, so the frame is drawn on pure black. Settings persist
-in `localStorage`. If the sensor permission is refused, hangs, or delivers no events (desktop, Meta's
-simulator), the app falls back to demo motion after a few seconds and the **Head** button switches back.
+Black pixels are transparent on the waveguide, so the frame is drawn on pure black. When the content
+centre is outside the 20° window an arrow at the edge shows where it is. If the sensor permission is
+refused or no samples arrive (desktop, Meta's simulator), the view can be dragged with the pointer.
 
-**Sensor axes.** The W3C orientation frame is defined for a phone screen; Meta's docs don't say how
-the sensor sits inside the glasses. The default (*Upright, screen faces wearer*) is the frame of a phone
-held in front of your face. If turning your head left/right pitches the content instead, press **Axes**
-until yaw, pitch and roll respond correctly, then **Recenter**. Turn on **Readout** to see the numbers.
+**Head tracking** (`src/glasses-head.js`). The glasses deliver `devicemotion` (gyroscope + gravity)
+and `deviceorientation` (compass heading + tilt) at about 60 Hz. The wearer's gaze is the device's
+−Z axis, as confirmed on Meta Display Glasses by
+[luke-hurd/rbm-display-head-gestures-js](https://github.com/luke-hurd/rbm-display-head-gestures-js).
+The tracker is a complementary filter in the spirit of Mahony's, plus the two things a display needs:
+
+1. **Gyro integration** of `rotationRate`, with the **bias** (1–2 °/s on the glasses) learned while the
+   head is still (< 4 °/s for 0.8 s, 4 s time constant) and subtracted.
+2. **Tilt** pulled towards measured gravity (2 s time constant); **heading** pulled towards the
+   orientation events' forward vector `Rz(α)·Rx(β)·Ry(γ)·[0,0,−1]` (2.5 s still, 8 s while moving:
+   the compass lags). Only the forward vector is used because the raw Euler angles flip near β = 90°.
+3. **Prediction** of the pose by angular velocity × 30 ms, the sensor-to-display latency.
+4. **Adaptive low-pass** (One Euro style): 120 ms time constant when still, 12 ms when moving, so the
+   content is pixel-still at rest and lag-free in motion.
+
+Without a gyroscope the orientation forward vector is used directly (150 ms filter). The tunables are
+`DEFAULT_TUNE` in `src/glasses-head.js`.
 
 ### Testing without the glasses
 
-1. `python serve.py` and open `http://localhost:8000/glasses.html` in a desktop browser. Arrows + Enter
-   drive the bar; drag the canvas to look around in *Drag* mode; `1`–`4` and `C` are desktop shortcuts.
+1. `python serve.py` and open `http://localhost:8000/glasses.html` in a desktop browser. Drag the canvas
+   to look around; Enter recenters; `←` `→` switch content; `↑` shows the readout.
 2. Install Meta's **Ray-Ban Display Simulator** Chrome extension (Chrome Web Store, id
    `jpjlmmodokemlepklkdbimceggpbjcll`) and turn it on over the page. It frames the 600 × 600 viewport,
    sends arrow / Select key events, overlays backgrounds and runs a quality checklist. It does not
    simulate the IMU, so the page shows demo motion.
-3. `npm test` loads `glasses.html` headlessly, feeds it synthetic IMU events, drives the bar with the
-   keyboard and checks that a 20° head turn produces a 20° content offset.
+3. `npm test` loads `glasses.html` headlessly, feeds it synthetic orientation and motion events, and
+   checks the orientation path, gyro bias learning, the turn direction, the fused path, recenter,
+   the edge indicator and the drag fallback.
+4. The page POSTs a log (raw sensor values, pose, input events) to `/log` on the server it came from;
+   `serve.py` appends it to `logs/<date>.jsonl`. Add `?log=0` to the URL to turn it off.
 
 ### Running it on the Ray-Ban Display
 
@@ -140,13 +152,14 @@ http://localhost:8000` also gives a temporary HTTPS URL.
    `fb-viewapp://web_app_deep_link?appName=DemiDoF&appUrl=<https-url>`.
 3. The app appears at the end of the app grid on the glasses, marked *unverified*. Launch it, press
    Select on **Start** and accept the sensor permission.
-4. Look straight ahead and press **Recenter**. Turn your head: in World-locked mode the cards stay put
-   and the display sweeps across them; in Head-locked mode they follow you (stock behaviour).
-5. Middle-tap opens the Web App menu (Restart, Resume, Permissions). **Record Display** in the Meta AI
-   app captures what the display shows.
+4. Look straight ahead, hold still for a second (the gyro bias is learned while still) and tap
+   (**Select**). Turn your head: the cards stay put and the display sweeps across them.
+5. A middle-finger tap on the Neural Band opens the Web App menu (Restart, Resume, Permissions). If the
+   sensor permission was refused once, re-enable it under Permissions. **Record Display** in the Meta
+   AI app captures what the display shows.
 
-Not yet verified on hardware: WebGL performance of Three.js in the glasses browser and the sensor-frame
-mapping. Both are the first things to check; the **Readout** and **Axes** buttons exist for that.
+Verified on hardware: WebGL rendering at ~60 fps, sensor rates, the device frame (gaze = −Z, gravity
+along +Y), the gyro bias. Not yet tuned on hardware: the filter time constants in `DEFAULT_TUNE`.
 
 ## Dev checks
 
