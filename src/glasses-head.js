@@ -59,7 +59,9 @@ export class GlassesHead {
 
     this.sensor = {
       listening: false,
-      permission: 'unknown', // 'unknown' | 'pending' | 'granted' | 'denied'
+      permission: 'unknown', // 'unknown' | 'pending' | 'granted' | 'denied' | 'none' (no API to ask)
+      permFn: null,          // which requestPermission() exists on the glasses: 'orientation' | 'motion' | 'none'
+      asked: 0, askMs: 0, lastResult: '',
       has: false,            // at least one usable sample (orientation or gyro) has arrived
       source: 'none',        // 'orientation' | 'gyro' | 'none'
       yawOffset: 0,
@@ -108,18 +110,52 @@ export class GlassesHead {
   }
 
   /**
-   * Start listening for orientation + motion events and, where the browser requires it, ask
-   * for permission (the call must come from a user gesture on the glasses and on iOS).
-   *
-   * Listeners are attached immediately: events only flow once permission exists, so attaching
-   * early is harmless and keeps a slow or hanging prompt from blocking the app. Resolves to
-   * false only when the APIs are missing or permission was refused.
+   * Ask for sensor permission and start listening. Follows Meta's Web App guidance:
+   * the request must come from a user gesture (Enter on a button), only one of the two
+   * requestPermission() functions is needed, and listeners are attached once it resolves
+   * 'granted'. Browsers without requestPermission() get the listeners immediately.
+   * Resolves to false when the APIs are missing or permission was refused.
    */
   async enableSensor() {
     if (!GlassesHead.sensorAvailable()) return false;
-    if (this.sensor.listening) return true;
     const s = this.sensor;
+    if (s.listening) return true;
+    this._makeHandlers();
 
+    const hasDO = typeof DeviceOrientationEvent !== 'undefined';
+    const hasDM = typeof DeviceMotionEvent !== 'undefined';
+    const ask = hasDO && typeof DeviceOrientationEvent.requestPermission === 'function'
+      ? { fn: 'orientation', call: () => DeviceOrientationEvent.requestPermission() }
+      : hasDM && typeof DeviceMotionEvent.requestPermission === 'function'
+        ? { fn: 'motion', call: () => DeviceMotionEvent.requestPermission() }
+        : null;
+    s.permFn = ask ? ask.fn : 'none';
+
+    if (ask) {
+      s.permission = 'pending';
+      s.asked++;
+      const t0 = performance.now();
+      let result;
+      try { result = await ask.call(); } catch (err) { console.warn('sensor permission', err); result = `error: ${err && err.message || err}`; }
+      s.askMs = performance.now() - t0;
+      s.lastResult = String(result);
+      s.permission = result === 'granted' ? 'granted' : 'denied';
+      if (s.permission !== 'granted') return false;
+    } else {
+      s.permission = 'none';
+    }
+    if (hasDO) {
+      window.addEventListener('deviceorientation', this._onOrient, true);
+      window.addEventListener('deviceorientationabsolute', this._onOrient, true);
+    }
+    if (hasDM) window.addEventListener('devicemotion', this._onMotion, true);
+    s.listening = true;
+    return true;
+  }
+
+  _makeHandlers() {
+    if (this._onOrient) return;
+    const s = this.sensor;
     this._onOrient = (e) => {
       // Prefer whichever event type fired first; ignore the other to avoid double samples.
       if (s.eventType && s.eventType !== e.type && (performance.now() - s.lastAt) / 1000 < ORIENT_STALE_S) return;
@@ -158,36 +194,11 @@ export class GlassesHead {
       if (s.source !== 'gyro') { s.source = 'gyro'; this.resetHead(); }
       if (!s.has) { s.has = true; this.resetHead(); }
     };
-    if (typeof DeviceOrientationEvent !== 'undefined') {
-      window.addEventListener('deviceorientation', this._onOrient, true);
-      window.addEventListener('deviceorientationabsolute', this._onOrient, true);
-    }
-    if (typeof DeviceMotionEvent !== 'undefined') window.addEventListener('devicemotion', this._onMotion, true);
-    s.listening = true;
-    s.permission = 'granted';
-
-    const asks = [];
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      asks.push(DeviceOrientationEvent.requestPermission());
-    }
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      asks.push(DeviceMotionEvent.requestPermission());
-    }
-    if (asks.length) {
-      s.permission = 'pending';
-      let granted = false;
-      for (const ask of asks) {
-        try { if ((await ask) === 'granted') granted = true; } catch (err) { console.warn('sensor permission', err); }
-      }
-      s.permission = granted ? 'granted' : 'denied';
-      if (!granted) { this.disableSensor(); return false; }
-    }
-    return true;
   }
 
   disableSensor() {
     const s = this.sensor;
-    if (!s.listening) return;
+    if (!s.listening) { s.has = false; s.source = 'none'; return; }
     window.removeEventListener('deviceorientation', this._onOrient, true);
     window.removeEventListener('deviceorientationabsolute', this._onOrient, true);
     window.removeEventListener('devicemotion', this._onMotion, true);

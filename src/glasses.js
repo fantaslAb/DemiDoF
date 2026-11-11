@@ -167,7 +167,7 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
       const waited = (performance.now() - t0) / 1000;
       const pending = head.sensor.permission === 'pending' && waited < SENSOR_PROMPT_S;
       if (pending || waited < SENSOR_GRACE_S) { sensorWatchdog = setTimeout(check, 250); return; }
-      toast('No head-sensor data yet. Demo motion until it arrives.');
+      toast('Permission OK but no sensor data yet. Demo motion until it arrives; Head button asks again.', 4000);
       setMotion('demo', { announce: false, keepListening: true });
       autoDemo = true;
     };
@@ -175,7 +175,7 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
     const ok = await head.enableSensor();
     if (!ok && head.motion === 'sensor') {
       clearTimeout(sensorWatchdog);
-      if (announce) toast('Sensor permission refused. Using demo motion.');
+      if (announce) toast(`Sensor permission: ${head.sensor.lastResult || 'refused'}. Demo motion; Head button asks again.`, 4000);
       return setMotion('demo', { announce: false });
     }
     return;
@@ -190,7 +190,11 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
 $('b-mode').addEventListener('click', () => setMode(MODE_ORDER[(MODE_ORDER.indexOf(params.mode) + 1) % MODE_ORDER.length]));
 $('b-content').addEventListener('click', () => setContent(CONTENT_ORDER[(CONTENT_ORDER.indexOf(params.content) + 1) % CONTENT_ORDER.length]));
 $('b-recenter').addEventListener('click', () => { head.resetHead(); toast('Recentred: this way is forward'); });
-$('b-motion').addEventListener('click', () => setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(head.motion) + 1) % MOTION_ORDER.length]));
+$('b-motion').addEventListener('click', () => {
+  // From the automatic fallback, one press re-requests the sensor (a user gesture is required).
+  if (autoDemo) { head.disableSensor(); return setMotion('sensor'); }
+  setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(head.motion) + 1) % MOTION_ORDER.length]);
+});
 $('b-frame').addEventListener('click', () => {
   head.nextFrame();
   setFrameLabel();
@@ -286,6 +290,8 @@ function updateHud(q, dt) {
     `head  <b>${fmtDeg(-e.yaw, true)}</b> / <b>${fmtDeg(e.pitch, true)}</b> / <b>${fmtDeg(e.roll, true)}</b>
 ` +
     `offset ${fmtDeg(display.contentOffset())} · ${src} · axes ${FRAMES[head.frameIndex].id}
+` +
+    `perm ${s.permission} · ask fn ${s.permFn || '?'} ×${s.asked}${s.lastResult ? ` → ${s.lastResult} ${(s.askMs / 1000).toFixed(1)}s` : ''} · listen ${s.listening ? 'yes' : 'no'}
 ` +
     `orient ${s.events} ev · ${s.rate.toFixed(0)}/s · αβγ ${f1(s.alpha)} ${f1(s.beta)} ${f1(s.gamma)}${s.absolute ? ' abs' : ''}
 ` +
