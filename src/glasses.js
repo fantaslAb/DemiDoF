@@ -143,28 +143,33 @@ function setFrameLabel() {
 }
 
 let sensorWatchdog = 0;
-const SENSOR_GRACE_S = 2.5;   // seconds without events after permission before falling back
-const SENSOR_PROMPT_S = 20;   // longest we wait on a permission prompt before falling back
-async function setMotion(mode, { announce = true } = {}) {
+let autoDemo = false;         // demo motion chosen by the watchdog, not by the wearer
+const SENSOR_GRACE_S = 6;     // seconds without samples after permission before falling back
+const SENSOR_PROMPT_S = 30;   // longest we wait on a permission prompt before falling back
+async function setMotion(mode, { announce = true, keepListening = false } = {}) {
   clearTimeout(sensorWatchdog);
+  autoDemo = false;
   if (mode === 'sensor') {
     if (!GlassesHead.sensorAvailable()) {
-      if (announce) toast('Head sensor not available here. Using demo motion.');
+      if (announce) toast('No motion-sensor API in this browser. Using demo motion.');
       return setMotion('demo', { announce: false });
     }
     head.motion = 'sensor';
+    head.resetHead();
     setLabel('b-motion', MOTION_SHORT.sensor);
     persist();
-    // Permission can hang (headless), be refused, or be granted while no events ever arrive
-    // (desktop, Meta's simulator). Fall back to demo motion in all three cases.
+    // Permission can hang, be refused, or be granted while no samples arrive (desktop,
+    // Meta's simulator). Fall back to demo motion, but keep listening: if samples start
+    // later, the frame loop switches back to the sensor by itself.
     const t0 = performance.now();
     const check = () => {
       if (head.motion !== 'sensor' || head.sensor.has) return;
       const waited = (performance.now() - t0) / 1000;
       const pending = head.sensor.permission === 'pending' && waited < SENSOR_PROMPT_S;
       if (pending || waited < SENSOR_GRACE_S) { sensorWatchdog = setTimeout(check, 250); return; }
-      toast('No head-sensor data. Using demo motion. Head button switches back.');
-      setMotion('demo', { announce: false });
+      toast('No head-sensor data yet. Demo motion until it arrives.');
+      setMotion('demo', { announce: false, keepListening: true });
+      autoDemo = true;
     };
     sensorWatchdog = setTimeout(check, 250);
     const ok = await head.enableSensor();
@@ -175,7 +180,7 @@ async function setMotion(mode, { announce = true } = {}) {
     }
     return;
   }
-  head.disableSensor();
+  if (!keepListening) head.disableSensor();
   head.motion = mode;
   head.resetHead();
   setLabel('b-motion', MOTION_SHORT[mode]);
@@ -270,16 +275,32 @@ function updateHud(q, dt) {
   if (hudTimer < 0.15 || hud.classList.contains('hidden')) return;
   hudTimer = 0;
   const e = yprFromQuat(q);
-  const src = head.motion === 'sensor' ? (head.sensor.has ? `sensor ${head.sensor.events}` : 'sensor · waiting') : head.motion;
+  const s = head.sensor;
+  const src = head.motion === 'sensor'
+    ? (s.has ? `${s.source}${s.hasYaw || s.source === 'gyro' ? '' : ' (no yaw)'}` : `waiting · perm ${s.permission}`)
+    : head.motion + (autoDemo ? ' (auto)' : '');
+  const f1 = (v) => (v === null || v === undefined ? '—' : v.toFixed(0));
   hud.innerHTML =
-    `<b>${MODE_SHORT[params.mode]}</b> · ${CONTENT_SHORT[params.content]}\n` +
-    `head  <b>${fmtDeg(-e.yaw, true)}</b> / <b>${fmtDeg(e.pitch, true)}</b> / <b>${fmtDeg(e.roll, true)}</b>\n` +
-    `offset ${fmtDeg(display.contentOffset())} · ${src}\n` +
-    `${fps.toFixed(0)} fps · ${FRAMES[head.frameIndex].id}`;
+    `<b>${MODE_SHORT[params.mode]}</b> · ${CONTENT_SHORT[params.content]}
+` +
+    `head  <b>${fmtDeg(-e.yaw, true)}</b> / <b>${fmtDeg(e.pitch, true)}</b> / <b>${fmtDeg(e.roll, true)}</b>
+` +
+    `offset ${fmtDeg(display.contentOffset())} · ${src} · axes ${FRAMES[head.frameIndex].id}
+` +
+    `orient ${s.events} ev · ${s.rate.toFixed(0)}/s · αβγ ${f1(s.alpha)} ${f1(s.beta)} ${f1(s.gamma)}${s.absolute ? ' abs' : ''}
+` +
+    `motion ${s.motionEvents} ev · ${s.motionRate.toFixed(0)}/s · gyro ${s.hasGyro ? 'yes' : 'no'} · grav ${s.hasGravity ? 'yes' : 'no'}
+` +
+    `${fps.toFixed(0)} fps`;
 }
 
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
+  if (autoDemo && head.sensor.has) {
+    autoDemo = false;
+    setMotion('sensor', { announce: false });
+    toast(`Head sensor connected (${head.sensor.source})`);
+  }
   const q = head.update(dt);
   display.update(q, dt);
   content.update(dt);

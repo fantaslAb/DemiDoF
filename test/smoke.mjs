@@ -99,7 +99,7 @@ try {
   await sleep(100);
   await gshot('g2-sensor-forward');
   await feed(-20, 90, 0); // turn 20 deg right (alpha decreases when turning right)
-  await sleep(100);
+  await sleep(400); // let the pose filter settle
   const sensorState = await gset(() => {
     const h = window.__glasses.head;
     return { motion: h.motion, has: h.sensor.has, events: h.sensor.events, offset: window.__glasses.display.contentOffset() };
@@ -151,6 +151,36 @@ try {
   console.log('glasses lit fraction', lit.toFixed(3));
   if (!(lit > 0.01)) errors.push(`glasses: frame looks empty (lit fraction ${lit})`);
   await g.close();
+
+  // Gyro fallback: only devicemotion (rotationRate + gravity) arrives, no orientation events.
+  const g3 = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
+  g3.on('pageerror', (e) => errors.push(`glasses3 pageerror: ${e.message}`));
+  await g3.goto(`http://127.0.0.1:${PORT}/glasses.html`, { waitUntil: 'load' });
+  await g3.waitForFunction(() => window.__glasses && window.__glasses.renderer.info.render.frame > 5, null, { timeout: 15000 });
+  await g3.evaluate(() => {
+    DeviceOrientationEvent.requestPermission = () => Promise.resolve('granted');
+    if (typeof DeviceMotionEvent !== 'undefined') DeviceMotionEvent.requestPermission = () => Promise.resolve('granted');
+  });
+  await g3.keyboard.press('Enter');
+  await sleep(200);
+  const feedMotion = (a) => g3.evaluate((alpha) => {
+    window.dispatchEvent(new DeviceMotionEvent('devicemotion', {
+      rotationRate: { alpha, beta: 0, gamma: 0 },
+      accelerationIncludingGravity: { x: 0, y: 9.81, z: 0 }, // upright: gravity along -Y of the device
+      interval: 50,
+    }));
+  }, a);
+  await feedMotion(0); // seeds the attitude from gravity
+  for (let i = 0; i < 8; i++) { await sleep(50); await feedMotion(-120); } // ~ -120 deg/s about the device z axis
+  await sleep(400);
+  const gyro = await g3.evaluate(() => {
+    const h = window.__glasses.head;
+    return { motion: h.motion, source: h.sensor.source, has: h.sensor.has, motionEvents: h.sensor.motionEvents, offset: window.__glasses.display.contentOffset() };
+  });
+  console.log('glasses gyro', gyro);
+  if (gyro.motion !== 'sensor' || gyro.source !== 'gyro') errors.push(`glasses: gyro fallback not active: ${JSON.stringify(gyro)}`);
+  if (!(gyro.offset > 5)) errors.push(`glasses: gyro integration produced no rotation (offset ${gyro.offset})`);
+  await g3.close();
 
   // Without sensor permission the app must still run, on demo motion.
   const g2 = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
