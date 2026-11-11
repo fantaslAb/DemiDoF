@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { ContentLayer } from './content.js';
 import { DisplayModel } from './display.js';
 import { GlassesHead, FRAMES } from './glasses-head.js';
-import { yprFromQuat, fmtDeg } from './math.js';
+import { RemoteLog } from './glasses-log.js';
+import { yprFromQuat, fmtDeg, angleBetween } from './math.js';
 
 /**
  * DemiDoF on the glasses themselves (Meta Ray-Ban Display Web App).
@@ -22,8 +23,13 @@ const MODE_BTN = { world: 'World', locked: 'Head', lazy: 'Lazy', level: 'Level' 
 const CONTENT_ORDER = ['workspace', 'hud', 'grid'];
 const CONTENT_SHORT = { workspace: 'Workspace', hud: 'HUD demo', grid: 'Angular grid' };
 const CONTENT_BTN = { workspace: 'Cards', hud: 'HUD', grid: 'Grid' };
-const MOTION_ORDER = ['sensor', 'demo', 'manual'];
-const MOTION_SHORT = { sensor: 'Sensor', demo: 'Demo', manual: 'Drag' };
+const MOTION_ORDER = ['sensor', 'gyro', 'demo', 'manual'];
+const MOTION_SHORT = { sensor: 'Sensor', gyro: 'Gyro', demo: 'Demo', manual: 'Drag' };
+let motionChoice = 'sensor'; // what the Head button shows; 'gyro' is 'sensor' with head.preferGyro
+
+// Remote log (serve.py appends it to logs/<date>.jsonl). `?log=0` turns it off.
+const rlog = new RemoteLog({ enabled: new URLSearchParams(location.search).get('log') !== '0' });
+rlog.log('load', { ua: navigator.userAgent, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, url: location.href });
 
 // ---------------------------------------------------------------------------
 // Persisted settings
@@ -110,7 +116,7 @@ function persist() {
   settings.content = params.content;
   settings.frame = head.frameIndex;
   settings.hud = !hud.classList.contains('hidden');
-  if (started) settings.motion = head.motion; // before Start the head is still in its initial state
+  if (started) settings.motion = motionChoice; // before Start the head is still in its initial state
   saveSettings(settings);
 }
 
@@ -123,6 +129,7 @@ function setMode(mode) {
   if (mode === 'world') display.recenter();
   setLabel('b-mode', MODE_BTN[mode]);
   toast(MODE_SHORT[mode]);
+  rlog.log('mode', { mode });
   persist();
 }
 function setContent(name) {
@@ -131,6 +138,7 @@ function setContent(name) {
   display.recenter();
   setLabel('b-content', CONTENT_BTN[name]);
   toast(CONTENT_SHORT[name]);
+  rlog.log('content', { name });
   persist();
 }
 function setHud(on) {
@@ -149,6 +157,16 @@ const SENSOR_PROMPT_S = 30;   // longest we wait on a permission prompt before f
 async function setMotion(mode, { announce = true, keepListening = false } = {}) {
   clearTimeout(sensorWatchdog);
   autoDemo = false;
+  rlog.log('motion', { mode });
+  if (mode === 'gyro' || mode === 'sensor') {
+    motionChoice = mode;
+    head.preferGyro = mode === 'gyro';
+    if (head.sensor.listening) { head.sensor.has = false; head.sensor.source = 'none'; }
+    mode = 'sensor';
+  } else {
+    motionChoice = mode;
+    head.preferGyro = false;
+  }
   if (mode === 'sensor') {
     if (!GlassesHead.sensorAvailable()) {
       if (announce) toast('No motion-sensor API in this browser. Using demo motion.');
@@ -156,7 +174,7 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
     }
     head.motion = 'sensor';
     head.resetHead();
-    setLabel('b-motion', MOTION_SHORT.sensor);
+    setLabel('b-motion', MOTION_SHORT[motionChoice]);
     persist();
     // Permission can hang, be refused, or be granted while no samples arrive (desktop,
     // Meta's simulator). Fall back to demo motion, but keep listening: if samples start
@@ -173,6 +191,8 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
     };
     sensorWatchdog = setTimeout(check, 250);
     const ok = await head.enableSensor();
+    const s = head.sensor;
+    rlog.log('perm', { ok, permission: s.permission, fn: s.permFn, asked: s.asked, result: s.lastResult, ms: Math.round(s.askMs) });
     if (!ok && head.motion === 'sensor') {
       clearTimeout(sensorWatchdog);
       if (announce) toast(`Sensor permission: ${head.sensor.lastResult || 'refused'}. Demo motion; Head button asks again.`, 4000);
@@ -189,18 +209,35 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
 
 $('b-mode').addEventListener('click', () => setMode(MODE_ORDER[(MODE_ORDER.indexOf(params.mode) + 1) % MODE_ORDER.length]));
 $('b-content').addEventListener('click', () => setContent(CONTENT_ORDER[(CONTENT_ORDER.indexOf(params.content) + 1) % CONTENT_ORDER.length]));
-$('b-recenter').addEventListener('click', () => { head.resetHead(); toast('Recentred: this way is forward'); });
+$('b-recenter').addEventListener('click', () => { head.resetHead(); toast('Recentred: this way is forward'); rlog.log('recenter', rawSample()); });
 $('b-motion').addEventListener('click', () => {
   // From the automatic fallback, one press re-requests the sensor (a user gesture is required).
-  if (autoDemo) { head.disableSensor(); return setMotion('sensor'); }
-  setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(head.motion) + 1) % MOTION_ORDER.length]);
+  if (autoDemo) { head.disableSensor(); return setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor'); }
+  setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(motionChoice) + 1) % MOTION_ORDER.length]);
 });
 $('b-frame').addEventListener('click', () => {
   head.nextFrame();
   setFrameLabel();
   persist();
   toast(`Sensor axes: ${FRAMES[head.frameIndex].label}`);
+  rlog.log('axes', { index: head.frameIndex, id: FRAMES[head.frameIndex].id });
 });
+
+/** Raw sensor state plus the resulting head pose, for the remote log. */
+function rawSample() {
+  const s = head.sensor;
+  const e = yprFromQuat(head.quaternion);
+  const r1 = (v) => Math.round(v * 10) / 10;
+  return {
+    src: head.motion === 'sensor' ? s.source : head.motion,
+    ev: s.events, mev: s.motionEvents, rate: r1(s.rate), mrate: r1(s.motionRate),
+    a: r1(s.alpha), b: r1(s.beta), g: r1(s.gamma), abs: s.absolute, et: s.eventType,
+    rr: s.hasGyro ? [r1(s.rr.a), r1(s.rr.b), r1(s.rr.g)] : null,
+    grav: s.hasGravity ? [r1(s.grav.x), r1(s.grav.y), r1(s.grav.z)] : null,
+    yaw: r1(-e.yaw), pitch: r1(e.pitch), roll: r1(e.roll), off: r1(display.contentOffset()),
+    so: (screen.orientation && screen.orientation.angle) || 0, axes: FRAMES[head.frameIndex].id,
+  };
+}
 $('b-hud').addEventListener('click', () => setHud(hud.classList.contains('hidden')));
 
 // ---------------------------------------------------------------------------
@@ -212,7 +249,8 @@ async function start() {
   $('start').classList.add('hidden');
   showBar(true);
   focusButton(0);
-  await setMotion(settings.motion === 'manual' ? 'manual' : 'sensor', { announce: true });
+  rlog.log('start', { settings });
+  await setMotion(settings.motion === 'manual' || settings.motion === 'gyro' ? settings.motion : 'sensor', { announce: true });
   toast('← → choose · Select activates · ↑ hides the bar', 3200);
 }
 $('b-start').addEventListener('click', start);
@@ -300,14 +338,25 @@ function updateHud(q, dt) {
     `${fps.toFixed(0)} fps`;
 }
 
+const _prevQ = new THREE.Quaternion();
+let logTimer = 0, lastSource = 'none', hadPrev = false;
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (autoDemo && head.sensor.has) {
     autoDemo = false;
-    setMotion('sensor', { announce: false });
+    setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor', { announce: false });
     toast(`Head sensor connected (${head.sensor.source})`);
   }
   const q = head.update(dt);
+  // Remote log: source changes, pose jumps, and a 5 Hz sample stream
+  if (head.sensor.source !== lastSource) { lastSource = head.sensor.source; rlog.log('source', rawSample()); }
+  if (hadPrev) {
+    const jump = angleBetween(_prevQ, q);
+    if (jump > 20) rlog.log('jump', { deg: Math.round(jump), dt: Math.round(dt * 1000), ...rawSample() });
+  }
+  _prevQ.copy(q); hadPrev = true;
+  logTimer += dt;
+  if (logTimer >= 0.2) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
   display.update(q, dt);
   content.update(dt);
   content.anchor.quaternion.copy(display.anchor);

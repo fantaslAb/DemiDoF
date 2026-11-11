@@ -8,6 +8,7 @@
 Your phone / headset will show a certificate warning once; accept it.
 """
 import argparse
+import datetime
 import http.server
 import os
 import pathlib
@@ -19,6 +20,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent
 CERT_DIR = ROOT / ".cert"
+LOG_DIR = ROOT / "logs"
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -40,6 +42,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_POST(self):
+        """POST /log: the glasses build sends JSON lines here; they are appended to logs/<date>.jsonl."""
+        if self.path.split("?")[0] != "/log":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        LOG_DIR.mkdir(exist_ok=True)
+        name = LOG_DIR / (datetime.date.today().isoformat() + ".jsonl")
+        with open(name, "ab") as f:
+            for line in body.splitlines():
+                line = line.strip()
+                if line:
+                    f.write(line + b"\n")
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.end_headers()
 
     def log_message(self, fmt, *args):
         if "200" in str(args) or "304" in str(args):

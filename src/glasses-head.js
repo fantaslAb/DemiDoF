@@ -48,6 +48,7 @@ export class GlassesHead {
     this.element = element;
     this.quaternion = new THREE.Quaternion();
     this.motion = 'manual'; // 'sensor' | 'demo' | 'manual'
+    this.preferGyro = false; // in 'sensor': integrate the gyroscope even when orientation events exist
     this.frameIndex = 0;
     this.smoothing = 0.045; // seconds; time constant of the pose filter (0 = off)
 
@@ -172,6 +173,7 @@ export class GlassesHead {
       if (s.lastAt) s.rate = s.rate * 0.9 + (1000 / Math.max(now - s.lastAt, 1)) * 0.1;
       s.lastAt = now;
       s.events++;
+      if (this.preferGyro) return; // orientation is recorded for the readout only
       if (s.source !== 'orientation') { s.source = 'orientation'; this.resetHead(); }
       if (!s.has) { s.has = true; this.resetHead(); }
     };
@@ -187,9 +189,9 @@ export class GlassesHead {
       s.motionEvents++;
       if (hasG) { s.hasGravity = true; s.grav.x = g.x; s.grav.y = g.y; s.grav.z = g.z; }
       if (hasRR) { s.hasGyro = true; s.rr.a = rr.alpha; s.rr.b = rr.beta; s.rr.g = rr.gamma; }
-      // Gyro integration is only used while orientation events are absent.
+      // Gyro integration is used while orientation events are absent, or when preferred.
       const orientFresh = s.lastAt && (now - s.lastAt) / 1000 < ORIENT_STALE_S;
-      if (orientFresh || !hasRR) return;
+      if ((orientFresh && !this.preferGyro) || !hasRR) return;
       this._integrateGyro(dt);
       if (s.source !== 'gyro') { s.source = 'gyro'; this.resetHead(); }
       if (!s.has) { s.has = true; this.resetHead(); }

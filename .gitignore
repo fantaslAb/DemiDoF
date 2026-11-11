@@ -3,3 +3,4 @@ node_modules/
 test-output/
 .DS_Store
 Thumbs.db
+logs/
