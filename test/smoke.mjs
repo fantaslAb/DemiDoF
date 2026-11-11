@@ -111,11 +111,32 @@ try {
   if (!(sensorState.offset > 15 && sensorState.offset < 25)) errors.push(`glasses: expected ~20 deg content offset after a 20 deg yaw, got ${sensorState.offset}`);
   await gshot('g3-sensor-yaw-right-20');
 
-  // Menu: Enter on the focused "Mode" button cycles world -> locked
+  // Snap mode: the pose is quantised into 20-degree detents with hysteresis.
+  await gset(() => window.__glasses.setMode('snap'));
+  await feed(0, 90, 0); await sleep(150);
+  await gset(() => window.__glasses.head.resetHead()); // forward = here, detent 0
+  await sleep(100);
+  await feed(-8, 90, 0); await sleep(300);   // 8 deg: inside the detent, content must not move
+  const snapA = await gset(() => window.__glasses.display.contentOffset());
+  await feed(-25, 90, 0); await sleep(400);  // 25 deg: past 65 % of a step -> next detent (20)
+  const snapB = await gset(() => window.__glasses.display.contentOffset());
+  await feed(-16, 90, 0); await sleep(400);  // back to 16 deg: still within the 20-degree detent
+  const snapC = await gset(() => window.__glasses.display.contentOffset());
+  console.log('glasses snap', { inside: snapA, next: snapB, back: snapC });
+  if (!(snapA < 0.5)) errors.push(`glasses snap: 8 deg should stay in the first detent, offset ${snapA}`);
+  if (!(snapB > 15 && snapB < 25)) errors.push(`glasses snap: 25 deg should click to the 20-degree detent, offset ${snapB}`);
+  if (!(snapC > 15 && snapC < 25)) errors.push(`glasses snap: 16 deg should stay on the 20-degree detent, offset ${snapC}`);
+  await gset(() => window.__glasses.setMode('world'));
+  await feed(0, 90, 0); await sleep(150);
+  await gset(() => window.__glasses.head.resetHead());
+  await feed(-20, 90, 0); await sleep(400);
+
+  // Menu: Enter on the focused "Mode" button cycles world -> snap
   await g.keyboard.press('Enter');
   await sleep(50);
   const mode1 = await gset(() => window.__glasses.params.mode);
-  if (mode1 !== 'locked') errors.push(`glasses: Mode button should cycle to locked, got ${mode1}`);
+  if (mode1 !== 'snap') errors.push(`glasses: Mode button should cycle to snap, got ${mode1}`);
+  await g.keyboard.press('Enter'); await sleep(50); // snap -> locked
   await gshot('g4-locked');
 
   // ArrowRight moves focus to "Content"; Enter cycles workspace -> hud

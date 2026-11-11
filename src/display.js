@@ -130,6 +130,7 @@ export class DisplayModel {
         this.anchor.copy(cq);
         break;
       case 'world':
+      case 'snap': // world-locked; the caller quantises the head pose into detents
         break;
       case 'lazy': {
         const ang = angleBetween(this.anchor, cq);

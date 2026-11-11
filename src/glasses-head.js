@@ -54,6 +54,11 @@ const GRAVITY_GAIN = 0.005;
  * motion; the orientation events (compass + accelerometer) are noisy but do not drift.
  */
 const FUSE_GAIN = 0.02;
+/** Gyro bias estimation: "still" means the raw rate magnitude stays below this (°/s)… */
+const BIAS_STILL_DPS = 4;
+/** …for at least this long (s) before the bias EMA (time constant BIAS_TAU_S) starts updating. */
+const BIAS_STILL_S = 0.8;
+const BIAS_TAU_S = 4;
 
 export class GlassesHead {
   constructor(element) {
@@ -96,6 +101,8 @@ export class GlassesHead {
     };
     this._qWD = new THREE.Quaternion(); // integrated gyro: device → Earth
     this._gyroSeeded = false;
+    this.bias = { x: 0, y: 0, z: 0 };   // gyro bias in °/s (beta, gamma, alpha)
+    this._stillFor = 0;
     this._target = new THREE.Quaternion();
     this.onReset = null;
     this._time = 0;
@@ -288,10 +295,26 @@ export class GlassesHead {
   // ---------------------------------------------------------------------------
   // Gyro integration (device frame D → Earth frame W, both W3C)
 
-  /** Body-frame angular velocity in D, radians per second. */
+  /** Body-frame angular velocity in D, radians per second, with the estimated bias removed. */
   _omega(target) {
+    const r = this.sensor.rr, b = this.bias;
+    return target.set((r.b - b.x) * DEG, (r.g - b.y) * DEG, (r.a - b.z) * DEG); // beta about X, gamma about Y, alpha about Z
+  }
+
+  /**
+   * Gyro bias: the glasses report 1–2 °/s while perfectly still. While the raw rate stays
+   * under BIAS_STILL_DPS for BIAS_STILL_S, average it into the bias (slow EMA).
+   */
+  _updateBias(dt) {
     const r = this.sensor.rr;
-    return target.set(r.b * DEG, r.g * DEG, r.a * DEG); // beta about X, gamma about Y, alpha about Z
+    const mag = Math.hypot(r.b, r.g, r.a);
+    if (mag > BIAS_STILL_DPS) { this._stillFor = 0; return; }
+    this._stillFor += dt;
+    if (this._stillFor < BIAS_STILL_S) return;
+    const k = Math.min(1, dt / BIAS_TAU_S);
+    this.bias.x += (r.b - this.bias.x) * k;
+    this.bias.y += (r.g - this.bias.y) * k;
+    this.bias.z += (r.a - this.bias.z) * k;
   }
 
   /** Measured "up" in D from accelerationIncludingGravity (flat device at rest → +Z). */
@@ -327,6 +350,7 @@ export class GlassesHead {
       return;
     }
     if (!(dt > 0)) return;
+    this._updateBias(dt);
     this._omega(_v);
     const w = _v.length();
     if (w > 1e-6) {
@@ -335,9 +359,10 @@ export class GlassesHead {
     }
     if (s.hasGravity && GRAVITY_GAIN > 0) {
       // Pull the predicted up towards the measured up, slowly, so tilt does not drift.
+      // q maps D → W; we need q' with q'·up_meas = Z, so q' = q ⊗ R(up_meas → up_pred).
       _v2.copy(_zee).applyQuaternion(_q0.copy(this._qWD).invert()); // predicted up in D
-      this._upD(_v3);
-      _qCorr.setFromUnitVectors(_v2, _v3);
+      this._upD(_v3);                                               // measured up in D
+      _qCorr.setFromUnitVectors(_v3, _v2);
       _q0.identity().slerp(_qCorr, GRAVITY_GAIN);
       this._qWD.multiply(_q0).normalize();
     }
