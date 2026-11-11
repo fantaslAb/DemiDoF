@@ -186,6 +186,30 @@ try {
   if (gyro.motion !== 'sensor' || gyro.source !== 'gyro') errors.push(`glasses: gyro fallback not active: ${JSON.stringify(gyro)}`);
   if (!(gyro.offset > 5)) errors.push(`glasses: gyro integration produced no rotation (offset ${gyro.offset})`);
 
+  // Fused: orientation events + gyroscope together -> source 'fused', driven by the gyro,
+  // heading pulled towards the orientation events.
+  await g3.evaluate(() => window.__glasses.setMotion('sensor'));
+  await sleep(100);
+  const feedOrient = (a) => g3.evaluate((alpha) => {
+    window.dispatchEvent(new DeviceOrientationEvent('deviceorientation', { alpha, beta: 90, gamma: 0, absolute: false }));
+  }, a);
+  await feedOrient(0);
+  await feedMotion([0, 0, 0]);
+  for (let i = 0; i < 6; i++) { await sleep(50); await feedOrient(0); await feedMotion([0, 0, 0]); }
+  await sleep(300);
+  const fused = await g3.evaluate(() => {
+    const h = window.__glasses.head;
+    return { source: h.sensor.source, has: h.sensor.has, offset: window.__glasses.display.contentOffset() };
+  });
+  console.log('glasses fused', fused);
+  if (fused.source !== 'fused') errors.push(`glasses: expected fused source with both event kinds, got ${JSON.stringify(fused)}`);
+  // Turn right with the gyro while the orientation events keep saying "0": the gyro wins at once.
+  await burst([0, 0, -120], 6);
+  await sleep(300);
+  const fusedTurn = await g3.evaluate(() => ({ source: window.__glasses.head.sensor.source, offset: window.__glasses.display.contentOffset() }));
+  console.log('glasses fused turn', fusedTurn);
+  if (!(fusedTurn.offset > 5)) errors.push(`glasses: fused pose did not follow the gyro (offset ${fusedTurn.offset})`);
+
   // Axes choice: up +Y / right +X is the upright phone (fix = identity); up +X / right -Y swaps the roles.
   const axes = await g3.evaluate(() => {
     const h = window.__glasses.head;

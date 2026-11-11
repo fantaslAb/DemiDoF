@@ -23,9 +23,10 @@ const MODE_BTN = { world: 'World', locked: 'Head', lazy: 'Lazy', level: 'Level' 
 const CONTENT_ORDER = ['workspace', 'hud', 'grid'];
 const CONTENT_SHORT = { workspace: 'Workspace', hud: 'HUD demo', grid: 'Angular grid' };
 const CONTENT_BTN = { workspace: 'Cards', hud: 'HUD', grid: 'Grid' };
-const MOTION_ORDER = ['sensor', 'gyro', 'demo', 'manual'];
-const MOTION_SHORT = { sensor: 'Sensor', gyro: 'Gyro', demo: 'Demo', manual: 'Drag' };
-let motionChoice = 'sensor'; // what the Head button shows; 'gyro' is 'sensor' with head.preferGyro
+const MOTION_ORDER = ['sensor', 'orient', 'gyro', 'demo', 'manual'];
+const MOTION_SHORT = { sensor: 'Fused', orient: 'Orient', gyro: 'Gyro', demo: 'Demo', manual: 'Drag' };
+const SOURCE_MODE = { sensor: 'auto', orient: 'orient', gyro: 'gyro' };
+let motionChoice = 'sensor'; // what the Head button shows; the first three are head.motion 'sensor' with a sourceMode
 
 // Remote log (serve.py appends it to logs/<date>.jsonl). `?log=0` turns it off.
 const rlog = new RemoteLog({ enabled: new URLSearchParams(location.search).get('log') !== '0' });
@@ -181,14 +182,14 @@ async function setMotion(mode, { announce = true, keepListening = false } = {}) 
   clearTimeout(sensorWatchdog);
   autoDemo = false;
   rlog.log('motion', { mode });
-  if (mode === 'gyro' || mode === 'sensor') {
+  if (SOURCE_MODE[mode]) {
     motionChoice = mode;
-    head.preferGyro = mode === 'gyro';
+    head.sourceMode = SOURCE_MODE[mode];
     if (head.sensor.listening) { head.sensor.has = false; head.sensor.source = 'none'; }
     mode = 'sensor';
   } else {
     motionChoice = mode;
-    head.preferGyro = false;
+    head.sourceMode = 'auto';
   }
   if (mode === 'sensor') {
     if (!GlassesHead.sensorAvailable()) {
@@ -235,7 +236,7 @@ $('b-content').addEventListener('click', () => setContent(CONTENT_ORDER[(CONTENT
 $('b-recenter').addEventListener('click', () => { head.resetHead(); toast('Recentred: this way is forward'); rlog.log('recenter', rawSample()); });
 $('b-motion').addEventListener('click', () => {
   // From the automatic fallback, one press re-requests the sensor (a user gesture is required).
-  if (autoDemo) { head.disableSensor(); return setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor'); }
+  if (autoDemo) { head.disableSensor(); return setMotion(SOURCE_MODE[motionChoice] ? motionChoice : 'sensor'); }
   setMotion(MOTION_ORDER[(MOTION_ORDER.indexOf(motionChoice) + 1) % MOTION_ORDER.length]);
 });
 // Axes: a second bar where the wearer picks which device axis is UP and which is RIGHT.
@@ -272,7 +273,7 @@ async function start() {
   showBar(true);
   focusButton(0);
   rlog.log('start', { settings });
-  await setMotion(settings.motion === 'manual' || settings.motion === 'gyro' ? settings.motion : 'sensor', { announce: true });
+  await setMotion(MOTION_ORDER.includes(settings.motion) && settings.motion !== 'demo' ? settings.motion : 'sensor', { announce: true });
   toast('← → choose · Select activates · ↑ hides the bar', 3200);
 }
 $('b-start').addEventListener('click', start);
@@ -280,8 +281,48 @@ $('b-start').addEventListener('click', start);
 // ---------------------------------------------------------------------------
 // Keys: the glasses deliver arrows and Enter; the app owns focus.
 
+/** Activate whatever is focused (Enter / Select / tap). Debounced so keydown + click never fire twice. */
+let lastActivate = 0;
+function activate(why) {
+  const now = performance.now();
+  if (now - lastActivate < 250) return;
+  lastActivate = now;
+  rlog.log('activate', { why, focus: document.activeElement && document.activeElement.id });
+  if (!started) { start(); return; }
+  const el = document.activeElement;
+  if (el && el.matches('[data-focusable]')) el.click();
+  else focusButton(focusIndex);
+}
+const ACTIVATE_KEYS = new Set(['Enter', ' ', 'Select', 'OK', 'Accept', 'NumpadEnter']);
+const isActivateKey = (e) => ACTIVATE_KEYS.has(e.key) || e.keyCode === 13 || e.keyCode === 32 || e.code === 'Enter' || e.code === 'NumpadEnter';
+
+// Every input event goes to the remote log so the glasses' key names can be read later.
+for (const type of ['keydown', 'keyup']) {
+  document.addEventListener(type, (e) => rlog.log('key', { type, key: e.key, code: e.code, keyCode: e.keyCode, trusted: e.isTrusted, target: e.target && e.target.id }), true);
+}
+document.addEventListener('click', (e) => {
+  rlog.log('click', { target: e.target && (e.target.id || e.target.tagName), trusted: e.isTrusted, focus: document.activeElement && document.activeElement.id });
+  // A tap that the shell delivers as a click outside the buttons still means "select".
+  if (!(e.target && e.target.closest && e.target.closest('button'))) activate('click-elsewhere');
+}, true);
+for (const type of ['pointerdown', 'pointerup']) {
+  document.addEventListener(type, (e) => rlog.log('pointer', { type, pt: e.pointerType, x: Math.round(e.clientX), y: Math.round(e.clientY), trusted: e.isTrusted, target: e.target && (e.target.id || e.target.tagName) }), true);
+}
+// A tap on the canvas (pointer down + up without moving) also selects.
+let tapStart = null;
+canvas.addEventListener('pointerdown', (e) => { tapStart = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+canvas.addEventListener('pointerup', (e) => {
+  if (!tapStart) return;
+  const moved = Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y);
+  if (moved < 12 && performance.now() - tapStart.t < 400) activate('canvas-tap');
+  tapStart = null;
+});
+// Some shells only send keyup for the select key.
+document.addEventListener('keyup', (e) => { if (isActivateKey(e)) { e.preventDefault(); activate(`keyup:${e.key}`); } });
+
 document.addEventListener('keydown', (e) => {
   const inStart = !started;
+  if (isActivateKey(e)) { e.preventDefault(); activate(`keydown:${e.key}`); return; }
   switch (e.key) {
     case 'ArrowLeft':
       e.preventDefault();
@@ -298,13 +339,6 @@ document.addEventListener('keydown', (e) => {
     case 'ArrowDown':
       e.preventDefault();
       if (!inStart) { showBar(true); focusButton(focusIndex); }
-      break;
-    case 'Enter':
-    case ' ':
-      e.preventDefault();
-      if (inStart) { start(); break; }
-      if (document.activeElement && document.activeElement.matches('[data-focusable]')) document.activeElement.click();
-      else focusButton(focusIndex);
       break;
     case 'Escape':
     case 'Backspace':
@@ -366,7 +400,7 @@ function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (autoDemo && head.sensor.has) {
     autoDemo = false;
-    setMotion(motionChoice === 'gyro' ? 'gyro' : 'sensor', { announce: false });
+    setMotion(SOURCE_MODE[motionChoice] ? motionChoice : 'sensor', { announce: false });
     toast(`Head sensor connected (${head.sensor.source})`);
   }
   const q = head.update(dt);

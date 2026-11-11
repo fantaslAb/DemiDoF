@@ -48,14 +48,23 @@ export const UP_CHOICES = ['auto', ...AXIS_NAMES];
 const ORIENT_STALE_S = 1.0;
 /** Per-sample gain of the gravity correction on the integrated gyro (≈ 4 s time constant at 50 Hz). */
 const GRAVITY_GAIN = 0.005;
+/**
+ * Per-sample gain pulling the integrated gyro's forward vector towards the orientation
+ * events' forward vector (≈ 1 s time constant at 50 Hz). The gyro gives smooth, immediate
+ * motion; the orientation events (compass + accelerometer) are noisy but do not drift.
+ */
+const FUSE_GAIN = 0.02;
 
 export class GlassesHead {
   constructor(element) {
     this.element = element;
     this.quaternion = new THREE.Quaternion();
     this.motion = 'manual'; // 'sensor' | 'demo' | 'manual'
-    this.preferGyro = false; // in 'sensor': integrate the gyroscope even when orientation events exist
+    // In 'sensor': 'auto' fuses the gyroscope with the orientation events when both exist
+    // ('fused'); 'orient' uses orientation events only; 'gyro' integrates the gyroscope only.
+    this.sourceMode = 'auto';
     this.smoothing = 0.045;  // seconds; time constant of the pose filter (0 = off)
+    this.orientSmoothing = 0.15; // seconds; filter used when only orientation events drive the pose
 
     // Which device axes are the wearer's UP and RIGHT (gyro path only). Defaults = the
     // documented W3C frame of the glasses: forward is -Z, so up is +Y and right is +X.
@@ -76,7 +85,7 @@ export class GlassesHead {
       permFn: null,          // which requestPermission() exists on the glasses: 'orientation' | 'motion' | 'none'
       asked: 0, askMs: 0, lastResult: '',
       has: false,            // at least one usable sample (orientation or gyro) has arrived
-      source: 'none',        // 'orientation' | 'gyro' | 'none'
+      source: 'none',        // 'fused' | 'orientation' | 'gyro' | 'none'
       yawOffset: 0,
       // orientation events
       alpha: 0, beta: 0, gamma: 0, hasYaw: false, absolute: false,
@@ -226,7 +235,10 @@ export class GlassesHead {
       if (s.lastAt) s.rate = s.rate * 0.9 + (1000 / Math.max(now - s.lastAt, 1)) * 0.1;
       s.lastAt = now;
       s.events++;
-      if (this.preferGyro) return; // orientation is recorded for the readout only
+      if (this.sourceMode === 'gyro') return; // recorded for the readout only
+      // With a live gyroscope in 'auto', the motion handler owns the pose ('fused').
+      const gyroFresh = this.sourceMode === 'auto' && s.motionLastAt && (now - s.motionLastAt) / 1000 < ORIENT_STALE_S && s.hasGyro;
+      if (gyroFresh) return;
       if (s.source !== 'orientation') { s.source = 'orientation'; this.resetHead(); }
       if (!s.has) { s.has = true; this.resetHead(); }
     };
@@ -242,11 +254,12 @@ export class GlassesHead {
       s.motionEvents++;
       if (hasG) { s.hasGravity = true; s.grav.x = g.x; s.grav.y = g.y; s.grav.z = g.z; }
       if (hasRR) { s.hasGyro = true; s.rr.a = rr.alpha; s.rr.b = rr.beta; s.rr.g = rr.gamma; }
-      // Gyro integration is used while orientation events are absent, or when preferred.
+      if (this.sourceMode === 'orient' || !hasRR) return; // recorded for the readout only
       const orientFresh = s.lastAt && (now - s.lastAt) / 1000 < ORIENT_STALE_S;
-      if ((orientFresh && !this.preferGyro) || !hasRR) return;
-      this._integrateGyro(dt);
-      if (s.source !== 'gyro') { s.source = 'gyro'; this.resetHead(); }
+      const fuse = this.sourceMode === 'auto' && orientFresh;
+      this._integrateGyro(dt, fuse);
+      const src = fuse ? 'fused' : 'gyro';
+      if (s.source !== src) { const was = s.source; s.source = src; if (was !== 'fused' && was !== 'gyro') this.resetHead(); }
       if (!s.has) { s.has = true; this.resetHead(); }
     };
   }
@@ -288,12 +301,28 @@ export class GlassesHead {
     return target.lengthSq() > 1 ? target.normalize() : target.set(0, 0, 1);
   }
 
-  _integrateGyro(dt) {
+  /** Forward gaze in the Earth frame W from the last orientation event: Rz(α)·Rx(β)·Ry(γ)·[0,0,-1]. */
+  _orientForwardW(target) {
+    const s = this.sensor;
+    const a = s.alpha * DEG, b = s.beta * DEG, g = s.gamma * DEG;
+    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
+    target.set(-(ca * sg + sa * sb * cg), ca * sb * cg - sa * sg, -(cb * cg)); // east, north, up
+    return target.lengthSq() > 1e-9 ? target.normalize() : target.set(0, 1, 0);
+  }
+
+  _integrateGyro(dt, fuse = false) {
     const s = this.sensor;
     if (!this._gyroSeeded) {
       // Level the attitude from gravity; heading is arbitrary until the first recenter.
       if (s.hasGravity) this._qWD.setFromUnitVectors(this._upD(_v), _zee);
       else this._qWD.identity();
+      if (fuse) {
+        // Start on the orientation events' heading so the fusion has nothing to catch up.
+        _v2.set(0, 0, -1).applyQuaternion(this._qWD);
+        this._orientForwardW(_v3);
+        _qCorr.setFromUnitVectors(_v2, _v3);
+        this._qWD.premultiply(_qCorr).normalize();
+      }
       this._gyroSeeded = true;
       return;
     }
@@ -311,6 +340,15 @@ export class GlassesHead {
       _qCorr.setFromUnitVectors(_v2, _v3);
       _q0.identity().slerp(_qCorr, GRAVITY_GAIN);
       this._qWD.multiply(_q0).normalize();
+    }
+    if (fuse && FUSE_GAIN > 0) {
+      // Pull the gyro's forward vector towards the orientation events' forward vector
+      // (world-frame correction), which removes heading drift without the compass jitter.
+      _v2.set(0, 0, -1).applyQuaternion(this._qWD);
+      this._orientForwardW(_v3);
+      _qCorr.setFromUnitVectors(_v2, _v3);
+      _q0.identity().slerp(_qCorr, FUSE_GAIN);
+      this._qWD.premultiply(_q0).normalize();
     }
   }
 
@@ -336,7 +374,7 @@ export class GlassesHead {
   /** Camera orientation in the three.js world, before the yaw offset. */
   _sensorQuat(target) {
     const s = this.sensor;
-    if (s.source === 'gyro') {
+    if (s.source === 'gyro' || s.source === 'fused') {
       const orient = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
       target.copy(_qScreen).multiply(this._qWD);               // three ← W ← D
       target.multiply(_q0.setFromAxisAngle(_zee, -orient * DEG)); // screen rotation (phones)
@@ -348,13 +386,9 @@ export class GlassesHead {
     // confirmed on-device by luke-hurd/rbm-display-head-gestures-js). Yaw and pitch come
     // from f, roll is dropped: the raw Euler angles flip together near β = 90°, and the
     // forward vector stays continuous where a full-attitude quaternion would jump.
-    const a = s.alpha * DEG, b = s.beta * DEG, g = s.gamma * DEG;
-    const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
-    const fx = -(ca * sg + sa * sb * cg);  // east
-    const fy = ca * sb * cg - sa * sg;     // north
-    const fz = -(cb * cg);                 // up
-    const heading = Math.atan2(fx, fy);    // clockwise from north: turning right increases it
-    const pitch = Math.atan2(fz, Math.hypot(fx, fy));
+    const f = this._orientForwardW(_v);
+    const heading = Math.atan2(f.x, f.y);  // clockwise from north: turning right increases it
+    const pitch = Math.atan2(f.z, Math.hypot(f.x, f.y));
     return quatFromYPR(target, -heading / DEG, pitch / DEG, 0);
   }
 
@@ -373,9 +407,11 @@ export class GlassesHead {
       quatFromYPR(_qDemo, 28 * Math.sin(tt * 0.45), 7 * Math.sin(tt * 0.9 + 1), 5 * Math.sin(tt * 0.7));
       t.multiply(_qDemo);
     }
-    // Low-pass the pose: sensor events arrive at their own rate and may be noisy.
-    if (this._snap || this.smoothing <= 0) { this.quaternion.copy(t); this._snap = false; }
-    else this.quaternion.slerp(t, 1 - Math.exp(-dt / this.smoothing));
+    // Low-pass the pose: sensor events arrive at their own rate and may be noisy. Orientation
+    // events alone (compass heading) get a heavier filter than the gyro-driven sources.
+    const tau = this.sensor.source === 'orientation' && this.motion === 'sensor' ? Math.max(this.smoothing, this.orientSmoothing) : this.smoothing;
+    if (this._snap || tau <= 0) { this.quaternion.copy(t); this._snap = false; }
+    else this.quaternion.slerp(t, 1 - Math.exp(-dt / tau));
     return this.quaternion;
   }
 }
