@@ -25,8 +25,8 @@ function loadSettings() { try { return JSON.parse(localStorage.getItem(STORE_KEY
 function saveSettings(s) { try { localStorage.setItem(STORE_KEY, JSON.stringify(s)); } catch { /* storage may be unavailable */ } }
 const settings = Object.assign({ content: 'workspace', hud: false }, loadSettings());
 
-const rlog = new RemoteLog({ enabled: new URLSearchParams(location.search).get('log') !== '0' });
-rlog.log('load', { ua: navigator.userAgent, w: innerWidth, h: innerHeight, url: location.href });
+// Remote log: on only while the readout is shown (swipe up), to save battery.
+const rlog = new RemoteLog();
 
 const params = {
   mode: 'world',
@@ -41,7 +41,7 @@ const params = {
 const canvas = $('gl');
 let renderer;
 try {
-  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false, powerPreference: 'default' });
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false, powerPreference: 'default' });
 } catch (err) {
   $('fatal').textContent = `WebGL is not available in this browser: ${err.message || err}`;
   $('fatal').classList.add('show');
@@ -58,7 +58,7 @@ content.setPreset(params.content);
 const display = new DisplayModel(params);
 const head = new HeadTracker(canvas, { gyroAxes: new URLSearchParams(location.search).get('gyro') || 'device' });
 // Recenter: apply the new yaw offset to the display camera first, then anchor the content there.
-head.onReset = () => { display.update(head.update(0), 0); display.recenter(); };
+head.onReset = () => { display.update(head.update(0), 0); display.recenter(); needsRender = true; };
 
 // ---------------------------------------------------------------------------
 // UI
@@ -79,11 +79,18 @@ function setContent(name) {
   params.content = name;
   content.setPreset(name);
   display.recenter();
+  needsRender = true;
   toast(CONTENT_SHORT[name]);
   rlog.log('content', { name });
   persist();
 }
-function setHud(on) { hud.classList.toggle('hidden', !on); persist(); }
+function setHud(on) {
+  hud.classList.toggle('hidden', !on);
+  const was = rlog.enabled;
+  rlog.setEnabled(on);
+  if (on && !was) rlog.log('load', { ua: navigator.userAgent, w: innerWidth, h: innerHeight, url: location.href });
+  persist();
+}
 function recenter(why) {
   head.resetHead();
   toast('Recentred: this way is forward');
@@ -176,7 +183,7 @@ function rawSample() {
     a: r1(s.alpha), b: r1(s.beta), g: r1(s.gamma), abs: s.absolute,
     rr: s.hasGyro ? [r1(s.rr.a), r1(s.rr.b), r1(s.rr.g)] : null,
     grav: s.hasGravity ? [r1(s.grav.x), r1(s.grav.y), r1(s.grav.z)] : null,
-    axes: head.axesName, gu: r1(head.gravityUsed),
+    axes: head.axesName, gu: r1(head.gravityUsed), drawn: r1(drawRatio),
     bias: [r1(head.bias.x), r1(head.bias.y), r1(head.bias.z)], speed: r1(head.speed), tau: Math.round(head.tau * 1000),
     yaw: r1(-e.yaw), pitch: r1(e.pitch), roll: r1(e.roll), off: r1(display.contentOffset()),
   };
@@ -198,7 +205,7 @@ function updateHud(q, dt) {
     `orient ${s.events} ev ${f1(s.rate)}/s · αβγ ${f1(s.alpha)} ${f1(s.beta)} ${f1(s.gamma)}${s.absolute ? ' abs' : ''}`,
     `motion ${s.motionEvents} ev ${f1(s.motionRate)}/s · gyro ${s.hasGyro ? head.axesName : 'no'} · grav ${s.hasGravity ? `${Math.round(head.gravityUsed * 100)}%` : 'no'}`,
     `bias ${head.bias.x.toFixed(1)} ${head.bias.y.toFixed(1)} ${head.bias.z.toFixed(1)} °/s · speed ${f1(head.speed)} °/s · τ ${Math.round(head.tau * 1000)} ms`,
-    `${fps.toFixed(0)} fps`,
+    `${fps.toFixed(0)} fps · drawn ${Math.round(drawRatio * 100)}% of frames · log ${rlog.enabled ? 'on' : 'off'}`,
   ];
   hud.innerHTML = lines.join('\n');
 }
@@ -225,6 +232,29 @@ function updateEdge() {
 const clock = new THREE.Clock();
 const _prevQ = new THREE.Quaternion();
 let logTimer = 0, lastSource = 'none', hadPrev = false;
+
+// Battery: draw only when the picture would change. The display camera must have turned by
+// more than half a pixel since the last drawn frame, a live card must have redrawn, or the
+// content must have changed. Slow drift therefore still redraws, but only every few frames.
+// When no content is inside the 20° window, one black frame is drawn and then nothing.
+const _lastDrawnQ = new THREE.Quaternion();
+const _frustum = new THREE.Frustum();
+const _pv = new THREE.Matrix4();
+let needsRender = true, drewBlank = false, drawRatio = 1;
+function contentInView() {
+  const cam = display.camera;
+  cam.updateMatrixWorld();
+  content.scene.updateMatrixWorld();
+  _frustum.setFromProjectionMatrix(_pv.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+  let seen = false;
+  content.anchor.traverse((o) => {
+    if (seen || !o.visible) return;
+    if (o.isSprite) seen = _frustum.intersectsSprite(o);
+    else if (o.isMesh || o.isLine || o.isPoints) seen = _frustum.intersectsObject(o);
+  });
+  return seen;
+}
+
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   const q = head.update(dt);
@@ -235,13 +265,25 @@ function frame() {
   }
   _prevQ.copy(q); hadPrev = true;
   logTimer += dt;
-  if (logTimer >= 0.05) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
+  if (logTimer >= 0.05 && rlog.enabled) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
 
   display.update(q, dt);
-  content.update(dt);
   content.anchor.quaternion.copy(display.anchor);
-  renderer.setViewport(0, 0, SIZE, SIZE);
-  renderer.render(content.scene, display.camera);
+  if (content.update(dt)) needsRender = true;
+  const moved = angleBetween(_lastDrawnQ, display.camera.quaternion) > params.fov / SIZE / 2;
+  let drew = false;
+  if (moved || needsRender) {
+    const inView = contentInView();
+    if (inView || !drewBlank) {
+      renderer.setViewport(0, 0, SIZE, SIZE);
+      renderer.render(content.scene, display.camera);
+      drewBlank = !inView;
+      drew = true;
+    }
+    _lastDrawnQ.copy(display.camera.quaternion);
+    needsRender = false;
+  }
+  drawRatio += ((drew ? 1 : 0) - drawRatio) * Math.min(1, dt / 2);
   updateEdge();
   updateHud(q, dt);
 }

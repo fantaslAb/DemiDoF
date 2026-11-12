@@ -223,6 +223,20 @@ try {
   const dragged = await g2.evaluate(() => window.__glasses.display.contentOffset());
   if (!(dragged > 5)) errors.push(`glasses: drag fallback should move the view, offset ${dragged}`);
   await g2.screenshot({ path: path.join(OUT, 'g6-drag-fallback.png') });
+
+  // Battery: nothing moves -> (almost) nothing is drawn; looking away from all content -> nothing.
+  const frames = () => g2.evaluate(() => window.__glasses.renderer.info.render.frame);
+  await sleep(400);
+  let f0 = await frames(); await sleep(1000); let f1 = await frames();
+  console.log('glasses draws while still', f1 - f0);
+  if (f1 - f0 > 3) errors.push(`glasses: should not redraw while nothing moves, drew ${f1 - f0} frames in 1 s`);
+  await g2.evaluate(() => { window.__glasses.head.yaw = 180; });
+  await sleep(400);
+  f0 = await frames(); await g2.evaluate(() => { window.__glasses.head.yaw = 170; }); await sleep(600); f1 = await frames();
+  console.log('glasses draws while looking away', f1 - f0);
+  if (f1 - f0 > 0) errors.push(`glasses: should not draw while no content is in view, drew ${f1 - f0}`);
+  f0 = await frames(); await g2.evaluate(() => { window.__glasses.head.yaw = 0; }); await sleep(400); f1 = await frames();
+  if (!(f1 - f0 > 0)) errors.push('glasses: content should be drawn again after looking back');
   await g2.close();
 } catch (e) {
   errors.push(`test: ${e.stack || e}`);

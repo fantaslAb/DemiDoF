@@ -28,13 +28,14 @@ export class ContentLayer {
     b(this);
   }
 
+  /** Redraws live widgets once a second. Returns true when something was redrawn. */
   update(dt) {
     const now = new Date();
     const sec = now.getSeconds();
-    if (sec !== this._clockSec) {
-      this._clockSec = sec;
-      for (const w of this._live) w.redraw(now);
-    }
+    if (sec === this._clockSec) return false;
+    this._clockSec = sec;
+    for (const w of this._live) w.redraw(now);
+    return this._live.length > 0;
   }
 
   _dispose() {

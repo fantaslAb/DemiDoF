@@ -63,6 +63,7 @@ export const DEFAULT_TUNE = {
   biasStillDps: 4,     // "still" = raw gyro magnitude below this (deg/s) ...
   biasStillS: 0.6,     // ... for at least this long before the bias estimate updates
   biasTau: 3.0,        // bias estimate time constant
+  restDeadbandDps: 0.5, // rates below this (after bias removal) are treated as zero: no drift at rest
   orientTau: 0.15,     // low-pass when only orientation events exist
 };
 
@@ -278,8 +279,9 @@ export class HeadTracker {
     this._updateBias(dt, raw);
     const b = this.bias;
     this._omega.set((raw.x - b.x) * DEG, (raw.y - b.y) * DEG, (raw.z - b.z) * DEG);
-    const w = this._omega.length();
+    let w = this._omega.length();
     this.speed = w / DEG;
+    if (this.speed < t.restDeadbandDps) { this._omega.set(0, 0, 0); w = 0; }
     if (w > 1e-6) {
       _qStep.setFromAxisAngle(_v.copy(this._omega).multiplyScalar(1 / w), w * dt);
       this._qWD.multiply(_qStep).normalize(); // body-frame rates: q <- q * dq

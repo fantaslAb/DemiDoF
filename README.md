@@ -86,7 +86,7 @@ events, but it does not simulate the IMU.
 | --- | --- |
 | Tap (Select) | Recenter: the way you look becomes forward, and the content moves into the display |
 | Swipe ← → | Content: cards → HUD → grid |
-| Swipe ↑ ↓ | Readout on / off: sensor source, raw values, gyro bias, filter state, fps |
+| Swipe ↑ ↓ | Debug on / off: the readout (sensor source, raw values, gyro bias, filter state, fps, share of frames drawn) and the remote log |
 | Middle-finger pinch | Meta's Web App menu: Restart, Resume, Permissions |
 
 **Simulator**
@@ -138,7 +138,16 @@ tuned for a display.
 4. **Prediction.** The pose is pushed forward by angular velocity × 30 ms, the sensor-to-display
    latency.
 5. **Adaptive smoothing.** A One Euro–style low-pass uses 120 ms when the head is still and 12 ms
-   when it moves. The content is still at rest and does not lag in motion.
+   when it moves. The content is still at rest and does not lag in motion. Rates below 0.5 °/s
+   after bias removal count as zero, so a resting head does not drift.
+
+### Battery
+
+The glasses page draws a frame only when the picture would change: the display camera turned by
+more than half a pixel since the last drawn frame, a live card redrew (once a second), or the content
+changed. When no content is inside the 20° window, it draws one black frame and stops; black is
+unlit on the waveguide. Antialiasing is off, the sensors stop while the app is hidden, and the
+remote log is off unless the readout is shown.
 
 All time constants are in `DEFAULT_TUNE`.
 
@@ -159,8 +168,9 @@ are not in Meta's documentation.
 | Swipes | Arrive as arrow keys | Content and readout |
 | Sensor permission | Remembered per domain; a refusal sticks | Re-enable it in the Web App menu → Permissions |
 
-The page POSTs a log of raw sensor values, pose and input events to `/log` on the server it came
-from. `serve.py` appends it to `logs/<date>.jsonl`. Add `?log=0` to turn it off.
+While the readout is on (swipe up), the page POSTs a log of raw sensor values, pose and input
+events to `/log` on the server it came from, 20 samples a second. `serve.py` appends it to
+`logs/<date>.jsonl`. With the readout off nothing is sent, which keeps the radio idle.
 
 ## Development
 
@@ -202,7 +212,8 @@ events do not move the gyro pose, recenter, the edge arrow and the drag fallback
 
 - [x] World-locked content on the real glasses with stable head tracking
 - [ ] Stability: drift-free heading without a compass, auto-recenter when the head rests
-- [ ] Battery: render only when the pose changes, lower the frame rate at rest
+- [x] Battery: draw only when the picture changes, nothing when the content is out of view, log off by default
+- [ ] Battery: measure the effect on the device
 - [ ] More content and interactions for the world-anchored workspace
 - [ ] Record head-motion traces and replay them to compare anchoring modes
 
