@@ -54,14 +54,29 @@ renderer.setSize(SIZE, SIZE, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setClearColor(0x000000, 1);
 
-// Focus cues replace the text hints; cards stand upright like panels in the room.
-const content = new ContentLayer({ hints: false, upright: true });
+// Focus cues replace the text hints. Cards face the eye (upright panels were tried on the
+// glasses and felt worse: the text no longer faces the wearer).
+const content = new ContentLayer({ hints: false });
 content.setPreset(params.content);
 const display = new DisplayModel(params);
 const focus = new FocusCues(content, display.camera, $('cues'), SIZE);
 const head = new HeadTracker(canvas, { gyroAxes: new URLSearchParams(location.search).get('gyro') || 'device' });
 // Recenter: apply the new yaw offset to the display camera first, then anchor the content there.
-head.onReset = () => { display.update(head.update(0), 0); display.recenter(); needsRender = true; };
+head.onReset = () => {
+  const q = head.update(0);
+  display.update(q, 0);
+  eyePosition(q, display.camera.position);
+  contentOrigin.copy(display.camera.position); // the content sphere is centred on the eye at recenter
+  display.recenter();
+  needsRender = true;
+};
+
+// Neck model: the head turns about the neck, not about the eye, so the eye moves a few
+// centimetres when the wearer turns or nods. The real room shows that parallax; moving the
+// render camera the same way keeps the content from sliding over the room.
+const NECK_TO_EYE = new THREE.Vector3(0, 0.075, -0.08); // metres, head frame: up, forward
+const contentOrigin = new THREE.Vector3();
+function eyePosition(q, target) { return target.copy(NECK_TO_EYE).applyQuaternion(q).sub(NECK_TO_EYE); }
 
 // ---------------------------------------------------------------------------
 // UI
@@ -273,6 +288,8 @@ function frame() {
   if (logTimer >= 0.05 && rlog.enabled) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
 
   display.update(q, dt);
+  eyePosition(q, display.camera.position);
+  content.anchor.position.copy(contentOrigin);
   content.anchor.quaternion.copy(display.anchor);
   if (content.update(dt)) needsRender = true;
   if (focus.update(dt, head.speed)) needsRender = true;
