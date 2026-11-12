@@ -2,33 +2,46 @@
 
 # DemiDoF
 
-**World-anchored content on the head-locked Meta Ray-Ban Display.**
-Turn your head and the 20° display sweeps across a workspace that stays put in the room.
+**Pin your glasses' screen to the room, not to your face.**
+A Web App for the Meta Ray-Ban Display that leaves content where you put it, so you look at it by
+turning your head.
 
 ![Platform](https://img.shields.io/badge/platform-Meta%20Ray--Ban%20Display%20Web%20App-0866ff)
 ![three.js](https://img.shields.io/badge/three.js-r170-black)
 ![Build](https://img.shields.io/badge/build%20step-none-brightgreen)
 ![Status](https://img.shields.io/badge/status-proof%20of%20concept-orange)
 
+| ![A clock and a message card stay above the laptop on the desk](docs/photo-hud.png) | ![A camera card stays on the wall 60° to the right; the readout runs at 31 fps](docs/photo-card.png) |
+| :---: | :---: |
+| The clock and the message stay above the laptop. | Turn 60° right: the camera card is on the wall. |
+
+*Captured on a real Ray-Ban Display, running from GitHub Pages.*
+
 **Try it:** connect `https://fantaslab.github.io/DemiDoF/glasses.html` as a Web App (see [Quick start](#quick-start)).
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Hardware notes](#hardware-notes) · [Development](#development) · [Roadmap](#roadmap)
-
-![DemiDoF on the glasses: the cards stay in the room while the 20° display moves with the head](docs/glasses.png)
+[What it is](#what-it-is) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Hardware notes](#hardware-notes) · [Roadmap](#roadmap)
 
 </div>
 
-## Why
+## What it is
 
-The Ray-Ban Display shows a 600 × 600 image, about 20° wide, fixed in the lower right of the right
-lens. Everything an app draws is glued to the head: zero degrees of freedom.
+**The problem.** The Ray-Ban Display is a small screen, about 20° wide, in the corner of the right
+lens. It moves with your head. Whatever an app shows sits in the same spot of your view, and it can
+show only one thing at a time.
 
-DemiDoF gives that window *half* a degree of freedom in software. The content is anchored in the
-world, and the display becomes a peephole you steer with your head. A row of cards 120° wide fits in
-a 20° screen, because you look at one card at a time, the way you would look around a desk.
+**The idea.** DemiDoF puts the content in the room instead: a clock above your laptop, messages
+beside it, the camera on the wall to the right. The screen becomes a window that you move with your
+head. Look at the laptop and you see the clock; turn right and you see the camera. Many things fit,
+because each one waits in its own place until you look at it, like notes on a desk.
 
-It is a proof of concept, and it runs on the real glasses as a Web App: plain HTML and JavaScript,
-no native SDK.
+**What works today.** Head tracking on the glasses is stable enough that content stays put in the
+room (see the photos). There is a fixed set of demo cards, a HUD demo and a grid for measuring.
+
+**Where it is going.** The goal is a workspace you arrange yourself and use every day: put real
+information where you want it, move and resize it with the glasses on, and try ways of showing it
+other than flat panels. See the [Roadmap](#roadmap).
+
+It runs on the real glasses as a Web App: plain HTML and JavaScript, no native SDK, no build step.
 
 ## Features
 
@@ -106,6 +119,8 @@ events, but it does not simulate the IMU.
 ## How it works
 
 ### Rendering
+
+![Three frames of the glasses page: the cards stay in place while the 20° display moves with the head](docs/glasses.png)
 
 ```
 head quaternion ──×── display placement ──► display camera (20° FOV, 1:1)
