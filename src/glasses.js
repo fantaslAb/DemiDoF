@@ -56,7 +56,7 @@ renderer.setClearColor(0x000000, 1);
 const content = new ContentLayer();
 content.setPreset(params.content);
 const display = new DisplayModel(params);
-const head = new HeadTracker(canvas);
+const head = new HeadTracker(canvas, { gyroAxes: new URLSearchParams(location.search).get('gyro') || 'device' });
 // Recenter: apply the new yaw offset to the display camera first, then anchor the content there.
 head.onReset = () => { display.update(head.update(0), 0); display.recenter(); };
 
@@ -176,6 +176,7 @@ function rawSample() {
     a: r1(s.alpha), b: r1(s.beta), g: r1(s.gamma), abs: s.absolute,
     rr: s.hasGyro ? [r1(s.rr.a), r1(s.rr.b), r1(s.rr.g)] : null,
     grav: s.hasGravity ? [r1(s.grav.x), r1(s.grav.y), r1(s.grav.z)] : null,
+    axes: head.axesName, gu: r1(head.gravityUsed),
     bias: [r1(head.bias.x), r1(head.bias.y), r1(head.bias.z)], speed: r1(head.speed), tau: Math.round(head.tau * 1000),
     yaw: r1(-e.yaw), pitch: r1(e.pitch), roll: r1(e.roll), off: r1(display.contentOffset()),
   };
@@ -195,7 +196,7 @@ function updateHud(q, dt) {
     `head  <b>${fmtDeg(-e.yaw, true)}</b> / <b>${fmtDeg(e.pitch, true)}</b> / <b>${fmtDeg(e.roll, true)}</b> · offset ${fmtDeg(display.contentOffset())}`,
     `source ${s.source} · perm ${s.permission} (${s.permFn || '?'} ×${s.asked}${s.lastResult ? ` → ${s.lastResult}` : ''})`,
     `orient ${s.events} ev ${f1(s.rate)}/s · αβγ ${f1(s.alpha)} ${f1(s.beta)} ${f1(s.gamma)}${s.absolute ? ' abs' : ''}`,
-    `motion ${s.motionEvents} ev ${f1(s.motionRate)}/s · gyro ${s.hasGyro ? 'yes' : 'no'} · grav ${s.hasGravity ? 'yes' : 'no'}`,
+    `motion ${s.motionEvents} ev ${f1(s.motionRate)}/s · gyro ${s.hasGyro ? head.axesName : 'no'} · grav ${s.hasGravity ? `${Math.round(head.gravityUsed * 100)}%` : 'no'}`,
     `bias ${head.bias.x.toFixed(1)} ${head.bias.y.toFixed(1)} ${head.bias.z.toFixed(1)} °/s · speed ${f1(head.speed)} °/s · τ ${Math.round(head.tau * 1000)} ms`,
     `${fps.toFixed(0)} fps`,
   ];
@@ -234,7 +235,7 @@ function frame() {
   }
   _prevQ.copy(q); hadPrev = true;
   logTimer += dt;
-  if (logTimer >= 0.2) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
+  if (logTimer >= 0.05) { logTimer = 0; rlog.log('s', { fps: Math.round(fps), ...rawSample() }); }
 
   display.update(q, dt);
   content.update(dt);

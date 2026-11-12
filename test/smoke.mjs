@@ -145,7 +145,8 @@ try {
   if (!(lit > 0.005)) errors.push(`glasses: frame looks empty (lit fraction ${lit})`);
   await g.close();
 
-  // Gyroscope + orientation (fused), and gyroscope only. Device upright: gravity +9.81 along +Y.
+  // Gyroscope. Device upright: gravity +9.81 along +Y. The glasses' rotationRate order is
+  // alpha = X (nod), beta = Y (turn), gamma = Z (sideways tilt): GYRO_AXES.device.
   const g3 = await browser.newPage({ viewport: { width: 600, height: 600 }, deviceScaleFactor: 1 });
   g3.on('pageerror', (e) => errors.push(`glasses3 pageerror: ${e.message}`));
   await g3.goto(`http://127.0.0.1:${PORT}/glasses.html`, { waitUntil: 'load' });
@@ -164,36 +165,47 @@ try {
   const burst = async (rate, n = 8, withOrient = null) => {
     for (let i = 0; i < n; i++) { await sleep(16); if (withOrient !== null) await feedOrient(withOrient); await feedMotion(rate); }
   };
-  // Gyro only: a constant bias of 1.5 deg/s about Z while "still" is learned and removed.
+  const pose = () => g3.evaluate(() => {
+    const G = window.__glasses, q = G.head.quaternion;
+    const V = G.display.camera.position.constructor; // THREE.Vector3
+    const { x: fx, y: fy, z: fz } = new V(0, 0, -1).applyQuaternion(q);
+    return { offset: G.display.contentOffset(), fx, fy, fz, src: G.head.sensor.source };
+  });
+  // A constant bias of 1.5 deg/s on the nod channel while "still" is learned and removed.
   await feedMotion([1.5, 0, 0]);
   await burst([1.5, 0, 0], 90); // ~1.5 s still
-  const biasState = await g3.evaluate(() => ({ source: window.__glasses.head.sensor.source, bias: window.__glasses.head.bias.z }));
+  const biasState = await g3.evaluate(() => ({ source: window.__glasses.head.sensor.source, bias: window.__glasses.head.bias.x }));
   console.log('glasses gyro bias', biasState);
   if (biasState.source !== 'gyro') errors.push(`glasses: expected gyro source, got ${JSON.stringify(biasState)}`);
   if (!(biasState.bias > 0.3)) errors.push(`glasses: gyro bias should be learned while still, got ${biasState.bias}`);
   await g3.keyboard.press('Enter'); await sleep(100); // recenter
-  // Turn right: ~ -120 deg/s about the device Y axis for 8 samples (~16 ms each) = about 15 deg.
-  await burst([1.5, 0, -120], 8);
+  // Turn right: -120 deg/s on beta (device Y) for 8 samples = about 15 deg, gaze stays level.
+  await burst([1.5, -120, 0], 8);
   await sleep(300);
-  const gyroTurn = await g3.evaluate(() => {
-    const e = window.__glasses.head.quaternion;
-    return { offset: window.__glasses.display.contentOffset(), qy: e.y };
-  });
+  const gyroTurn = await pose();
   console.log('glasses gyro turn', gyroTurn);
   if (!(gyroTurn.offset > 5)) errors.push(`glasses: gyro turn produced no rotation (offset ${gyroTurn.offset})`);
-  if (!(gyroTurn.qy < 0)) errors.push(`glasses: turning right should give a negative yaw quaternion y, got ${gyroTurn.qy}`);
+  if (!(gyroTurn.fx > 0.1)) errors.push(`glasses: turning right should move the gaze to +X, got ${JSON.stringify(gyroTurn)}`);
+  if (!(Math.abs(gyroTurn.fy) < 0.05)) errors.push(`glasses: a turn must not tilt the gaze up/down, got ${JSON.stringify(gyroTurn)}`);
 
-  // Fused: both streams; the gyro drives, the heading is pulled towards the orientation events.
-  await burst([1.5, 0, 0], 10, 0);
+  // Orientation events (compass) next to the gyroscope must not move the pose.
+  await burst([1.5, 0, 0], 4); await g3.keyboard.press('Enter'); await sleep(100);
+  const before = await pose();
+  await burst([1.5, 0, 0], 30, 60); // compass says 60 deg, gyro says still
   await sleep(200);
-  const fused = await g3.evaluate(() => window.__glasses.head.sensor.source);
-  if (fused !== 'fused') errors.push(`glasses: expected fused source with both event kinds, got ${fused}`);
-  await g3.keyboard.press('Enter'); await sleep(100);
-  await burst([1.5, 0, -120], 8, 0);
+  const after = await pose();
+  console.log('glasses compass ignored', before.offset, after.offset, after.src);
+  if (after.src !== 'gyro') errors.push(`glasses: gyro should stay the source with orientation events present, got ${after.src}`);
+  if (!(Math.abs(after.offset - before.offset) < 1)) errors.push(`glasses: orientation events moved the gyro pose (${before.offset} -> ${after.offset})`);
+
+  // Nod up: +alpha (device X) raises the gaze and does not turn it sideways.
+  await burst([1.5, 0, 0], 4); await g3.keyboard.press('Enter'); await sleep(100);
+  await burst([1.5 + 100, 0, 0], 6);
   await sleep(300);
-  const fusedTurn = await g3.evaluate(() => window.__glasses.display.contentOffset());
-  console.log('glasses fused turn', fusedTurn);
-  if (!(fusedTurn > 5)) errors.push(`glasses: fused pose did not follow the gyro (offset ${fusedTurn})`);
+  const nod = await pose();
+  console.log('glasses gyro nod', nod);
+  if (!(nod.fy > 0.1)) errors.push(`glasses: nodding up should raise the gaze, got ${JSON.stringify(nod)}`);
+  if (!(Math.abs(nod.fx) < 0.05)) errors.push(`glasses: a nod must not turn the gaze sideways, got ${JSON.stringify(nod)}`);
   await g3.close();
 
   // Without sensor permission the app must still run (drag fallback), without errors.

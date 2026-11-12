@@ -2,24 +2,27 @@ import * as THREE from 'three';
 import { DEG, quatFromYPR, yprFromQuat, clamp } from './math.js';
 
 /**
- * Head tracker for the on-glasses build: one job, the wearer's head orientation, as
- * stable and as immediate as the glasses' sensors allow.
+ * Head tracker for the on-glasses build: the wearer's head orientation, as stable and as
+ * immediate as the glasses' sensors allow.
  *
- * Signal chain (all in the W3C device frame D: X right, Y up, Z towards the wearer;
- * the wearer looks along -Z, which is confirmed on Meta Display Glasses):
+ * Signal chain (device frame D: X right, Y up, Z towards the wearer; gaze is -Z):
  *
  *   gyroscope (devicemotion.rotationRate, ~60 Hz)
- *     → bias removed (estimated while the head is still)
- *     → integrated into q_WD (device → Earth)
- *     → tilt pulled towards gravity        (complementary filter, slow)
- *     → heading pulled towards the orientation events' forward vector (slower)
+ *     -> channels mapped to device axes (GYRO_AXES, measured on the glasses)
+ *     -> bias removed (estimated while the head is still)
+ *     -> integrated into q_WD (device -> Earth)
+ *     -> tilt pulled towards measured gravity (slow, only while |a| is close to g)
  *   per frame:
- *     → predicted forward by the display latency (ω · T_PREDICT)
- *     → yaw offset from the last recenter
- *     → adaptive low-pass: heavy when still (no jitter), light when moving (no lag)
+ *     -> predicted forward by the display latency (omega * predict)
+ *     -> yaw offset from the last recenter
+ *     -> adaptive low-pass: heavy when still (no jitter), light when moving (no lag)
  *
- * Without a gyroscope the orientation events' forward vector is used directly; without
- * any sensor the pose comes from pointer drag (desktop testing).
+ * Heading comes from the gyroscope alone. The orientation events are NOT fused: on the
+ * Ray-Ban Display their heading turns the opposite way to the gyroscope and jumps near
+ * beta = 90, which made the content spin. A tap (recenter) removes the slow yaw drift.
+ *
+ * Without a gyroscope the orientation events are used directly; without any sensor the
+ * pose comes from pointer drag (desktop testing).
  */
 
 const _q = new THREE.Quaternion();
@@ -31,31 +34,45 @@ const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _zee = new THREE.Vector3(0, 0, 1);
-const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90° about X: Earth (Z up) → three.js (Y up)
+const _qScreen = new THREE.Quaternion(-Math.SQRT1_2, 0, 0, Math.SQRT1_2); // -90 deg about X: Earth (Z up) -> three.js (Y up)
 
 /** Seconds of silence after which a sensor stream is considered gone. */
 const STALE_S = 1.0;
+const G = 9.81;
+
+/**
+ * Which rotationRate field is the rate about device X, Y, Z (and its sign).
+ * The W3C spec says alpha = Z, beta = X, gamma = Y. The Ray-Ban Display's WebView delivers
+ * alpha = X, beta = Y, gamma = Z (measured: nodding shows in alpha and matches the change
+ * of gravity; turning shows in beta; tilting the head sideways shows in gamma).
+ * `?gyro=spec` in the URL switches to the spec mapping.
+ */
+export const GYRO_AXES = {
+  device: { x: ['a', 1], y: ['b', 1], z: ['g', 1] },
+  spec: { x: ['b', 1], y: ['g', 1], z: ['a', 1] },
+};
 
 /** Tunables (seconds unless noted). Exposed as `tracker.tune` for the readout and tests. */
 export const DEFAULT_TUNE = {
-  predict: 0.030,      // forward prediction by angular velocity: sensor → display latency
+  predict: 0.030,      // forward prediction by angular velocity: sensor -> display latency
   tauRest: 0.120,      // output low-pass time constant when the head is still
-  tauFast: 0.012,      // … when the head moves quickly
-  speedScale: 25,      // °/s at which the low-pass has moved most of the way to tauFast
-  gravityTau: 2.0,     // tilt correction towards measured gravity
-  headingTauRest: 2.5, // heading correction towards the orientation events, head still
-  headingTauMove: 8.0, // … head moving (the compass lags during motion)
-  biasStillDps: 4,     // "still" = raw gyro magnitude below this (°/s) …
-  biasStillS: 0.8,     // … for at least this long before the bias estimate updates
-  biasTau: 4.0,        // bias estimate time constant
+  tauFast: 0.012,      // ... when the head moves quickly
+  speedScale: 25,      // deg/s at which the low-pass has moved most of the way to tauFast
+  gravityTau: 1.5,     // tilt correction towards measured gravity
+  gravityTol: 0.08,    // trust gravity only while | |a| / g - 1 | is below this
+  biasStillDps: 4,     // "still" = raw gyro magnitude below this (deg/s) ...
+  biasStillS: 0.6,     // ... for at least this long before the bias estimate updates
+  biasTau: 3.0,        // bias estimate time constant
   orientTau: 0.15,     // low-pass when only orientation events exist
 };
 
 export class HeadTracker {
-  constructor(element) {
+  constructor(element, { gyroAxes = 'device' } = {}) {
     this.element = element;
     this.quaternion = new THREE.Quaternion(); // output: camera orientation, three.js world
     this.tune = { ...DEFAULT_TUNE };
+    this.axesName = GYRO_AXES[gyroAxes] ? gyroAxes : 'device';
+    this.axes = GYRO_AXES[this.axesName];
     this.yawOffset = 0;
     this.sensitivity = 0.12; // drag: degrees per CSS pixel
 
@@ -63,7 +80,7 @@ export class HeadTracker {
       listening: false,
       permission: 'unknown', // 'unknown' | 'pending' | 'granted' | 'denied' | 'none'
       permFn: null, asked: 0, askMs: 0, lastResult: '',
-      source: 'none',        // 'fused' | 'gyro' | 'orientation' | 'none'
+      source: 'none',        // 'gyro' | 'orientation' | 'none'
       has: false,
       // orientation events
       alpha: 0, beta: 0, gamma: 0, absolute: false, events: 0, lastAt: 0, rate: 0, eventType: null,
@@ -71,10 +88,12 @@ export class HeadTracker {
       motionEvents: 0, motionLastAt: 0, motionRate: 0, hasGyro: false, hasGravity: false,
       rr: { a: 0, b: 0, g: 0 }, grav: { x: 0, y: 0, z: 0 },
     };
-    this.bias = { x: 0, y: 0, z: 0 }; // °/s about device X (beta), Y (gamma), Z (alpha)
-    this.speed = 0;                   // |ω| after bias removal, °/s (drives the adaptive filter)
+    this.bias = { x: 0, y: 0, z: 0 }; // deg/s about device X, Y, Z
+    this.speed = 0;                   // |omega| after bias removal, deg/s
     this.tau = this.tune.tauRest;     // current output time constant (readout)
+    this.gravityUsed = 0;             // recent fraction of samples where gravity was trusted
     this._omega = new THREE.Vector3(); // rad/s, device frame, bias removed
+    this._raw3 = new THREE.Vector3();  // deg/s, device frame, bias not removed
     this._qWD = new THREE.Quaternion();
     this._seeded = false;
     this._stillFor = 0;
@@ -182,7 +201,7 @@ export class HeadTracker {
       s.lastAt = now;
       s.events++;
       const gyroFresh = s.hasGyro && s.motionLastAt && (now - s.motionLastAt) / 1000 < STALE_S;
-      if (gyroFresh) return; // the motion handler owns the pose
+      if (gyroFresh) return; // the gyroscope owns the pose; orientation is only a fallback
       this._setSource('orientation');
     };
     this._onMotion = (e) => {
@@ -198,35 +217,35 @@ export class HeadTracker {
       if (hasG) { s.hasGravity = true; s.grav.x = g.x; s.grav.y = g.y; s.grav.z = g.z; }
       if (!hasRR) return;
       s.hasGyro = true;
-      s.rr.a = rr.alpha; s.rr.b = rr.beta; s.rr.g = rr.gamma;
-      const orientFresh = s.lastAt && (now - s.lastAt) / 1000 < STALE_S;
-      this._step(dt, orientFresh);
-      this._setSource(orientFresh ? 'fused' : 'gyro');
+      s.rr.a = rr.alpha; s.rr.b = rr.beta || 0; s.rr.g = rr.gamma || 0;
+      this._step(dt);
+      this._setSource('gyro');
     };
   }
 
   _setSource(src) {
     const s = this.sensor;
-    const wasGyroBased = s.source === 'fused' || s.source === 'gyro';
-    const isGyroBased = src === 'fused' || src === 'gyro';
-    if (s.source !== src) {
-      s.source = src;
-      if (!(wasGyroBased && isGyroBased)) this.resetHead(); // frame changed: re-zero yaw
-    }
+    if (s.source !== src) { s.source = src; this.resetHead(); } // frame changed: re-zero yaw
     if (!s.has) { s.has = true; this.resetHead(); }
   }
 
   // ---------------------------------------------------------------------------
   // Fusion (runs on every devicemotion sample)
 
-  /** Measured "up" in D from accelerationIncludingGravity (flat device at rest → +Z). */
+  /** Gyro rates about device X, Y, Z in deg/s, bias not removed. */
+  _rates(target) {
+    const r = this.sensor.rr, m = this.axes;
+    return target.set(r[m.x[0]] * m.x[1], r[m.y[0]] * m.y[1], r[m.z[0]] * m.z[1]);
+  }
+
+  /** Measured "up" in D from accelerationIncludingGravity (upright glasses -> +Y). */
   _upD(target) {
     const g = this.sensor.grav;
     target.set(g.x, g.y, g.z);
     return target.lengthSq() > 1 ? target.normalize() : target.set(0, 1, 0);
   }
 
-  /** Forward gaze in Earth frame from the orientation events: Rz(α)·Rx(β)·Ry(γ)·[0,0,-1]. */
+  /** Forward gaze in Earth frame from the orientation events: Rz(a) Rx(b) Ry(g) [0,0,-1]. */
   _orientForwardW(target) {
     const s = this.sensor;
     const a = s.alpha * DEG, b = s.beta * DEG, g = s.gamma * DEG;
@@ -235,58 +254,49 @@ export class HeadTracker {
     return target.lengthSq() > 1e-9 ? target.normalize() : target.set(0, 1, 0);
   }
 
-  _updateBias(dt) {
-    const t = this.tune, r = this.sensor.rr;
-    if (Math.hypot(r.b, r.g, r.a) > t.biasStillDps) { this._stillFor = 0; return; }
+  _updateBias(dt, raw) {
+    const t = this.tune;
+    if (raw.length() > t.biasStillDps) { this._stillFor = 0; return; }
     this._stillFor += dt;
     if (this._stillFor < t.biasStillS) return;
     const k = Math.min(1, dt / t.biasTau);
-    this.bias.x += (r.b - this.bias.x) * k;
-    this.bias.y += (r.g - this.bias.y) * k;
-    this.bias.z += (r.a - this.bias.z) * k;
+    this.bias.x += (raw.x - this.bias.x) * k;
+    this.bias.y += (raw.y - this.bias.y) * k;
+    this.bias.z += (raw.z - this.bias.z) * k;
   }
 
-  _step(dt, fuse) {
+  _step(dt) {
     const s = this.sensor, t = this.tune;
     if (!this._seeded) {
-      // Level from gravity; take the heading from the orientation events when they exist.
+      // Level from gravity; the heading is arbitrary until the first recenter.
       if (s.hasGravity) this._qWD.setFromUnitVectors(this._upD(_v), _zee); else this._qWD.identity();
-      if (fuse) {
-        _v2.set(0, 0, -1).applyQuaternion(this._qWD);
-        this._orientForwardW(_v3);
-        this._qWD.premultiply(_qCorr.setFromUnitVectors(_v2, _v3)).normalize();
-      }
       this._seeded = true;
       return;
     }
     if (!(dt > 0)) return;
-    this._updateBias(dt);
-    const r = this.sensor.rr, b = this.bias;
-    this._omega.set((r.b - b.x) * DEG, (r.g - b.y) * DEG, (r.a - b.z) * DEG);
+    const raw = this._rates(this._raw3);
+    this._updateBias(dt, raw);
+    const b = this.bias;
+    this._omega.set((raw.x - b.x) * DEG, (raw.y - b.y) * DEG, (raw.z - b.z) * DEG);
     const w = this._omega.length();
     this.speed = w / DEG;
     if (w > 1e-6) {
       _qStep.setFromAxisAngle(_v.copy(this._omega).multiplyScalar(1 / w), w * dt);
-      this._qWD.multiply(_qStep).normalize(); // body-frame rates: q ← q ⊗ Δq
+      this._qWD.multiply(_qStep).normalize(); // body-frame rates: q <- q * dq
     }
     if (s.hasGravity) {
-      // Tilt: q' = q ⊗ R(up_meas → up_pred) so that q'·up_meas = Z.
-      _v2.copy(_zee).applyQuaternion(_q0.copy(this._qWD).invert());
-      this._upD(_v3);
-      _qCorr.setFromUnitVectors(_v3, _v2);
-      _q0.identity().slerp(_qCorr, 1 - Math.exp(-dt / t.gravityTau));
-      this._qWD.multiply(_q0).normalize();
-    }
-    if (fuse) {
-      // Heading (and residual tilt): world-frame pull of the forward vector towards the
-      // orientation events' forward vector. Slower while moving: the compass lags.
-      const moving = clamp(this.speed / t.speedScale, 0, 1);
-      const tau = t.headingTauRest + (t.headingTauMove - t.headingTauRest) * moving;
-      _v2.set(0, 0, -1).applyQuaternion(this._qWD);
-      this._orientForwardW(_v3);
-      _qCorr.setFromUnitVectors(_v2, _v3);
-      _q0.identity().slerp(_qCorr, 1 - Math.exp(-dt / tau));
-      this._qWD.premultiply(_q0).normalize();
+      // Tilt: q' = q * R(up_meas -> up_pred), so that q' maps measured up to Earth Z.
+      // Skip samples where the head accelerates (|a| far from g): they do not show "up".
+      const gs = s.grav, mag = Math.hypot(gs.x, gs.y, gs.z) / G;
+      const ok = Math.abs(mag - 1) < t.gravityTol;
+      this.gravityUsed += ((ok ? 1 : 0) - this.gravityUsed) * Math.min(1, dt);
+      if (ok) {
+        _v2.copy(_zee).applyQuaternion(_q0.copy(this._qWD).invert());
+        this._upD(_v3);
+        _qCorr.setFromUnitVectors(_v3, _v2);
+        _q0.identity().slerp(_qCorr, 1 - Math.exp(-dt / t.gravityTau));
+        this._qWD.multiply(_q0).normalize();
+      }
     }
   }
 
@@ -296,7 +306,7 @@ export class HeadTracker {
   /** Raw camera orientation in the three.js world (no yaw offset, no prediction). */
   _raw(target) {
     const s = this.sensor;
-    if (s.source === 'fused' || s.source === 'gyro') return target.copy(_qScreen).multiply(this._qWD);
+    if (s.source === 'gyro') return target.copy(_qScreen).multiply(this._qWD);
     if (s.source === 'orientation') {
       const f = this._orientForwardW(_v);
       const heading = Math.atan2(f.x, f.y);
@@ -317,12 +327,11 @@ export class HeadTracker {
   update(dt) {
     const s = this.sensor, t = this.tune, out = this._target;
     this._raw(out);
-    const gyroBased = s.source === 'fused' || s.source === 'gyro';
+    const gyroBased = s.source === 'gyro';
     if (gyroBased && t.predict > 0) {
-      // Predict where the head will be when the frame is shown.
+      // Predict where the head will be when the frame is shown (omega is in the body frame).
       const w = this._omega.length();
       if (w > 1e-6) {
-        // ω is in D; the camera frame equals D here (forward -Z, up +Y), so apply it in body frame.
         _qStep.setFromAxisAngle(_v.copy(this._omega).multiplyScalar(1 / w), w * t.predict);
         out.multiply(_qStep);
       }

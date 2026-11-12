@@ -109,18 +109,24 @@ refused or no samples arrive (desktop, Meta's simulator), the view can be dragge
 and `deviceorientation` (compass heading + tilt) at about 60 Hz. The wearer's gaze is the device's
 −Z axis, as confirmed on Meta Display Glasses by
 [luke-hurd/rbm-display-head-gestures-js](https://github.com/luke-hurd/rbm-display-head-gestures-js).
-The tracker is a complementary filter in the spirit of Mahony's, plus the two things a display needs:
+The tracker is a gyro + gravity complementary filter in the spirit of Mahony's, plus the two things a
+display needs:
 
-1. **Gyro integration** of `rotationRate`, with the **bias** (1–2 °/s on the glasses) learned while the
-   head is still (< 4 °/s for 0.8 s, 4 s time constant) and subtracted.
-2. **Tilt** pulled towards measured gravity (2 s time constant); **heading** pulled towards the
-   orientation events' forward vector `Rz(α)·Rx(β)·Ry(γ)·[0,0,−1]` (2.5 s still, 8 s while moving:
-   the compass lags). Only the forward vector is used because the raw Euler angles flip near β = 90°.
-3. **Prediction** of the pose by angular velocity × 30 ms, the sensor-to-display latency.
-4. **Adaptive low-pass** (One Euro style): 120 ms time constant when still, 12 ms when moving, so the
+1. **Gyro integration** of `rotationRate`. On the glasses the fields are **not** in the W3C order:
+   `alpha` is the rate about device X (nod), `beta` about Y (turn), `gamma` about Z (sideways tilt).
+   This was measured from the logs: the nod channel matches the change of gravity, and so on
+   (`GYRO_AXES` in `src/glasses-head.js`; `?gyro=spec` selects the spec order). The **bias**
+   (up to 1–2 °/s) is learned while the head is still (< 4 °/s for 0.6 s, 3 s time constant).
+2. **Tilt** pulled towards measured gravity (1.5 s time constant), only while |a| is within 8 % of g,
+   so head accelerations do not tip the horizon.
+3. **No compass.** The orientation events' heading turns the opposite way to the gyroscope on the
+   glasses and jumps near β = 90°; fusing it made the content spin. Heading is gyro-only; a tap
+   (recenter) removes the slow yaw drift.
+4. **Prediction** of the pose by angular velocity × 30 ms, the sensor-to-display latency.
+5. **Adaptive low-pass** (One Euro style): 120 ms time constant when still, 12 ms when moving, so the
    content is pixel-still at rest and lag-free in motion.
 
-Without a gyroscope the orientation forward vector is used directly (150 ms filter). The tunables are
+Without a gyroscope the orientation events are used directly (150 ms filter). The tunables are
 `DEFAULT_TUNE` in `src/glasses-head.js`.
 
 ### Testing without the glasses
@@ -132,8 +138,9 @@ Without a gyroscope the orientation forward vector is used directly (150 ms filt
    sends arrow / Select key events, overlays backgrounds and runs a quality checklist. It does not
    simulate the IMU, so the page shows demo motion.
 3. `npm test` loads `glasses.html` headlessly, feeds it synthetic orientation and motion events, and
-   checks the orientation path, gyro bias learning, the turn direction, the fused path, recenter,
-   the edge indicator and the drag fallback.
+   checks the orientation path, gyro bias learning, the turn and nod directions in the glasses' gyro
+   order, that orientation events do not move the gyro pose, recenter, the edge indicator and the
+   drag fallback.
 4. The page POSTs a log (raw sensor values, pose, input events) to `/log` on the server it came from;
    `serve.py` appends it to `logs/<date>.jsonl`. Add `?log=0` to the URL to turn it off.
 
@@ -159,7 +166,8 @@ http://localhost:8000` also gives a temporary HTTPS URL.
    AI app captures what the display shows.
 
 Verified on hardware: WebGL rendering at ~60 fps, sensor rates, the device frame (gaze = −Z, gravity
-along +Y), the gyro bias. Not yet tuned on hardware: the filter time constants in `DEFAULT_TUNE`.
+along +Y), the gyro channel order, the gyro bias. Not yet tuned on hardware: the filter time
+constants in `DEFAULT_TUNE`.
 
 ## Dev checks
 
