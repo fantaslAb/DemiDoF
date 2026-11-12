@@ -10,7 +10,10 @@ import { FONT, makeCanvas, canvasTexture, roundRect, textSprite } from './textur
  * `anchor` is the group the DisplayModel rotates according to the anchoring mode.
  */
 export class ContentLayer {
-  constructor() {
+  /** @param {{hints?: boolean}} opts  hints: text hints pointing to off-screen cards */
+  constructor({ hints = true } = {}) {
+    this.hints = hints;
+    this.items = []; // cards: { mesh, width, height, color } for the focus rule (src/focus.js)
     this.scene = new THREE.Scene();
     this.anchor = new THREE.Group();
     this.scene.add(this.anchor);
@@ -40,6 +43,7 @@ export class ContentLayer {
 
   _dispose() {
     this._live.length = 0;
+    this.items.length = 0;
     const kill = (o) => {
       if (o.geometry) o.geometry.dispose();
       if (o.material) {
@@ -52,7 +56,7 @@ export class ContentLayer {
   }
 
   /** Create a card at (az, el) with angular size, drawn by `draw(ctx, w, h, now)`. */
-  card({ az = 0, el = 0, wDeg = 10, hDeg = 6, draw, live = false, radius = 32 }) {
+  card({ az = 0, el = 0, wDeg = 10, hDeg = 6, draw, live = false, radius = 32, color = '#ffffff' }) {
     const w = Math.round(wDeg * this.pxPerDeg);
     const h = Math.round(hDeg * this.pxPerDeg);
     const canvas = makeCanvas(w, h);
@@ -64,6 +68,7 @@ export class ContentLayer {
     );
     this.place(mesh, az, el);
     this.anchor.add(mesh);
+    this.items.push({ mesh, width: angularSize(wDeg, this.radius), height: angularSize(hDeg, this.radius), color });
     const widget = {
       mesh,
       redraw: (now = new Date()) => {
@@ -172,7 +177,7 @@ function buildWorkspace(layer) {
   ];
   for (const a of apps) {
     layer.card({
-      az: a.az, el: 0, wDeg: 15, hDeg: 10,
+      az: a.az, el: 0, wDeg: 15, hDeg: 10, color: a.color,
       draw(ctx, w, h) {
         frame(ctx, w, h, 36, { stroke: a.color + '99' });
         text(ctx, a.glyph, 0.9 * PX, 2.3 * PX, { size: 2.2, color: a.color, baseline: 'middle' });
@@ -224,8 +229,10 @@ function buildWorkspace(layer) {
     layer.place(s, az, -7.2);
     layer.anchor.add(s);
   };
-  hint(-10, '← Maps · Notes · Timer');
-  hint(10, 'Music · Calendar · Camera →');
+  if (layer.hints) {
+    hint(-10, '← Maps · Notes · Timer');
+    hint(10, 'Music · Calendar · Camera →');
+  }
 }
 
 /** Angular reference grid: 5° lines, 10° labels, over ±60° azimuth / ±40° elevation. */

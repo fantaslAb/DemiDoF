@@ -35,7 +35,7 @@ no native SDK.
 | **What you see** | The 600 × 600 display itself, drawn on black (black is transparent on the waveguide) | A first-person room with the virtual display overlaid at its real size and place |
 | **Anchoring** | World-locked | Head-locked, world-locked, lazy follow, horizon-level |
 | **Head input** | The glasses' gyroscope and accelerometer, filtered and predicted | Mouse, keys, phone gyroscope, scripted demo, Quest WebXR (right eye only) |
-| **Content** | Cards across 120°, HUD demo, angular grid | Same, plus FOV / offset / roll / brightness sliders and PNG export of the device frame |
+| **Content** | Cards across 120°, HUD demo, angular grid; a card is drawn only when half of it is in view, otherwise a dot on the edge shows where it is | Same, plus FOV / offset / roll / brightness sliders and PNG export of the device frame |
 | **Diagnostics** | On-screen readout, remote log to the dev server | Live numbers for head, display centre and content offset |
 
 ![The simulator's four anchoring modes with the head turned or rolled](docs/modes.png)
@@ -140,6 +140,14 @@ tuned for a display.
 5. **Adaptive smoothing.** A One Euro–style low-pass uses 120 ms when the head is still and 12 ms
    when it moves. The content is still at rest and does not lag in motion. Rates below 0.5 °/s
    after bias removal count as zero, so a resting head does not drift.
+
+### Focus cues
+
+A card is drawn only while at least half of it is inside the 20° window. A card that is mostly
+outside is not what the wearer is looking at, so it is replaced by a dot on the window edge, in the
+card's colour, pointing to where it is. Nearer cards give larger, brighter dots; cards in the same
+direction line up side by side. Cards fade in and out over 120 ms, with hysteresis (appear at 50 %,
+disappear below 40 %), so nothing flickers at the edge. `src/focus.js` holds the rule.
 
 ### Battery
 

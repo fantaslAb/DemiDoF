@@ -3,6 +3,7 @@ import { ContentLayer } from './content.js';
 import { DisplayModel } from './display.js';
 import { HeadTracker } from './glasses-head.js';
 import { RemoteLog } from './glasses-log.js';
+import { FocusCues } from './focus.js';
 import { yprFromQuat, fmtDeg, angleBetween } from './math.js';
 
 /**
@@ -53,9 +54,10 @@ renderer.setSize(SIZE, SIZE, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setClearColor(0x000000, 1);
 
-const content = new ContentLayer();
+const content = new ContentLayer({ hints: false }); // the focus cues replace the text hints
 content.setPreset(params.content);
 const display = new DisplayModel(params);
+const focus = new FocusCues(content, display.camera, $('cues'), SIZE);
 const head = new HeadTracker(canvas, { gyroAxes: new URLSearchParams(location.search).get('gyro') || 'device' });
 // Recenter: apply the new yaw offset to the display camera first, then anchor the content there.
 head.onReset = () => { display.update(head.update(0), 0); display.recenter(); needsRender = true; };
@@ -217,7 +219,9 @@ function updateEdge() {
   const e = yprFromQuat(_rel);
   const dx = -e.yaw, dy = e.pitch; // + = content is to the right / above
   const half = params.fov / 2;
-  if (Math.abs(dx) < half - 2 && Math.abs(dy) < half - 2) { edge.classList.remove('show'); return; }
+  // With cards on screen, the focus cues already show where everything else is.
+  const inside = Math.abs(dx) < half - 2 && Math.abs(dy) < half - 2;
+  if (inside || focus.shownCount > 0) { edge.classList.remove('show'); return; }
   const arrow = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? '→' : '←') : (dy > 0 ? '↑' : '↓');
   edge.textContent = `${arrow} ${Math.round(Math.hypot(dx, dy))}°`;
   edge.classList.add('show');
@@ -270,6 +274,7 @@ function frame() {
   display.update(q, dt);
   content.anchor.quaternion.copy(display.anchor);
   if (content.update(dt)) needsRender = true;
+  if (focus.update(dt)) needsRender = true;
   const moved = angleBetween(_lastDrawnQ, display.camera.quaternion) > params.fov / SIZE / 2;
   let drew = false;
   if (moved || needsRender) {
@@ -294,4 +299,4 @@ renderer.setAnimationLoop(frame);
 $('b-start').focus({ preventScroll: true });
 
 // Exposed for the smoke test
-window.__glasses = { params, display, content, head, renderer, start, setContent, recenter };
+window.__glasses = { params, display, content, head, renderer, focus, start, setContent, recenter };
