@@ -10,9 +10,16 @@ import { FONT, makeCanvas, canvasTexture, roundRect, textSprite } from './textur
  * `anchor` is the group the DisplayModel rotates according to the anchoring mode.
  */
 export class ContentLayer {
-  /** @param {{hints?: boolean}} opts  hints: text hints pointing to off-screen cards */
-  constructor({ hints = true } = {}) {
+  /**
+   * @param {{hints?: boolean, upright?: boolean}} opts
+   *   hints:   text hints pointing to off-screen cards
+   *   upright: cards stand vertical like panels in the room (turned only left/right towards the
+   *            wearer) instead of tilting to face the eye; a card above eye level is then seen
+   *            from below, as a real panel would be
+   */
+  constructor({ hints = true, upright = false } = {}) {
     this.hints = hints;
+    this.upright = upright;
     this.items = []; // cards: { mesh, width, height, color } for the focus rule (src/focus.js)
     this.scene = new THREE.Scene();
     this.anchor = new THREE.Group();
@@ -85,6 +92,7 @@ export class ContentLayer {
   place(obj, az, el) {
     quatFromYPR(obj.quaternion, -az, el, 0);
     obj.position.set(0, 0, -this.radius).applyQuaternion(obj.quaternion);
+    if (this.upright) quatFromYPR(obj.quaternion, -az, 0, 0);
   }
 }
 

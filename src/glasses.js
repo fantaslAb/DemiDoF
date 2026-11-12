@@ -54,7 +54,8 @@ renderer.setSize(SIZE, SIZE, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setClearColor(0x000000, 1);
 
-const content = new ContentLayer({ hints: false }); // the focus cues replace the text hints
+// Focus cues replace the text hints; cards stand upright like panels in the room.
+const content = new ContentLayer({ hints: false, upright: true });
 content.setPreset(params.content);
 const display = new DisplayModel(params);
 const focus = new FocusCues(content, display.camera, $('cues'), SIZE);
