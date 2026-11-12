@@ -274,7 +274,7 @@ function frame() {
   display.update(q, dt);
   content.anchor.quaternion.copy(display.anchor);
   if (content.update(dt)) needsRender = true;
-  if (focus.update(dt)) needsRender = true;
+  if (focus.update(dt, head.speed)) needsRender = true;
   const moved = angleBetween(_lastDrawnQ, display.camera.quaternion) > params.fov / SIZE / 2;
   let drew = false;
   if (moved || needsRender) {

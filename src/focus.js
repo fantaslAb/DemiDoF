@@ -3,8 +3,12 @@ import * as THREE from 'three';
 /**
  * Focus rule for the 20° window: a card is drawn only while at least half of it is inside
  * the display. A card that is mostly outside is not what the wearer is attending to, so it
- * is replaced by a location cue: a small dot on the window edge, in the card's colour,
- * pointing to where the card is. Nearer cards give brighter, larger dots.
+ * is replaced by a location cue: a short, thin bar flush with the window edge, in the
+ * card's colour, on the side where the card is.
+ *
+ * Cues stay out of the way: only the nearest hidden card per side gets one, and they fade
+ * out while the wearer holds still on a card (reading) and come back when the head turns
+ * (searching) or when no card is in view.
  *
  * "Half" is measured against the smaller of the card and the window, so a card wider than
  * the window still counts as in focus when it fills most of the window.
@@ -13,8 +17,12 @@ import * as THREE from 'three';
 const SHOW_AT = 0.5;   // fraction inside to appear
 const HIDE_AT = 0.4;   // fraction inside to disappear (hysteresis: no flicker at the edge)
 const FADE_S = 0.12;   // fade time for appear / disappear
-const EDGE_INSET = 12; // px from the window edge to the dot centre
-const MERGE_PX = 18;   // cues closer than this along the edge share one spot
+const EDGE_INSET = 3;  // px from the window edge to the bar
+const BAR_LEN = 34;    // px along the edge
+const BAR_W = 4;       // px across the edge
+const CUE_FADE_S = 0.3;   // cue fade time
+const CUE_HOLD_S = 1.2;   // cues fade out after holding still this long with a card in view
+const CUE_MOVE_DPS = 20;  // head speed that brings the cues back
 
 const _v = new THREE.Vector3();
 const _c = new THREE.Vector3();
@@ -35,6 +43,8 @@ export class FocusCues {
     this.state = new Map(); // item -> { shown, opacity, frac }
     this.dots = [];
     this.shownCount = 0;
+    this.cueAlpha = 1;
+    this._still = 0;
   }
 
   setEnabled(on) {
@@ -65,8 +75,11 @@ export class FocusCues {
     return (ix * iy) / Math.min(area, 4); // the window is 2 x 2 in NDC
   }
 
-  /** Updates visibility, fades and cues. Returns true when the canvas must be redrawn. */
-  update(dt) {
+  /**
+   * Updates visibility, fades and cues. `speed` is the head's angular speed in deg/s.
+   * Returns true when the canvas must be redrawn.
+   */
+  update(dt, speed = 0) {
     if (!this.enabled) return false;
     const cam = this.camera;
     cam.updateMatrixWorld();
@@ -96,36 +109,40 @@ export class FocusCues {
       const len = Math.hypot(dx, dy) || 1;
       dx /= len; dy /= len;
       const t = (half - EDGE_INSET) / Math.max(Math.abs(dx), Math.abs(dy));
-      cues.push({ x: half + dx * t, y: half + dy * t, ang, color: item.color });
+      const side = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
+      cues.push({ x: half + dx * t, y: half + dy * t, ang, side, color: item.color });
     }
     this.shownCount = shown;
+    // Cue visibility: away while reading, back when searching.
+    this._still = speed > CUE_MOVE_DPS ? 0 : this._still + dt;
+    const want = shown === 0 || this._still < CUE_HOLD_S ? 1 : 0;
+    const k = dt > 0 ? dt / CUE_FADE_S : 1;
+    this.cueAlpha = want > this.cueAlpha ? Math.min(1, this.cueAlpha + k) : Math.max(0, this.cueAlpha - k);
     this._place(cues);
     return redraw;
   }
 
   _place(cues) {
-    // Nearest first; cues landing on the same spot are laid out side by side along the edge.
-    cues.sort((a, b) => a.ang - b.ang);
-    const spots = [];
-    for (const c of cues) {
-      const spot = spots.find((s) => Math.hypot(s.x - c.x, s.y - c.y) < MERGE_PX);
-      if (spot) spot.list.push(c); else spots.push({ x: c.x, y: c.y, list: [c] });
-    }
+    // Nearest hidden card per side only.
+    const best = {};
+    for (const c of cues) if (!best[c.side] || c.ang < best[c.side].ang) best[c.side] = c;
     let n = 0;
-    for (const s of spots) {
-      const onSide = s.x < EDGE_INSET + 1 || s.x > this.size - EDGE_INSET - 1; // left/right edge: stack vertically
-      s.list.forEach((c, i) => {
+    if (this.cueAlpha > 0.01) {
+      for (const c of Object.values(best)) {
         const dot = this._dot(n++);
-        const r = Math.max(4, 9 - c.ang / 12);          // nearer = larger
-        const alpha = Math.max(0.35, 1 - c.ang / 120);  // nearer = brighter
-        const off = (i - (s.list.length - 1) / 2) * 16;
-        const x = onSide ? s.x : s.x + off, y = onSide ? s.y + off : s.y;
-        dot.style.transform = `translate(${(x - r).toFixed(1)}px, ${(y - r).toFixed(1)}px)`;
-        dot.style.width = dot.style.height = `${(r * 2).toFixed(1)}px`;
+        const vertical = c.side === 'left' || c.side === 'right';
+        const w = vertical ? BAR_W : BAR_LEN, h = vertical ? BAR_LEN : BAR_W;
+        const max = this.size - EDGE_INSET;
+        const x = c.side === 'left' ? EDGE_INSET : c.side === 'right' ? max - w : Math.min(max - w, Math.max(EDGE_INSET, c.x - w / 2));
+        const y = c.side === 'top' ? EDGE_INSET : c.side === 'bottom' ? max - h : Math.min(max - h, Math.max(EDGE_INSET, c.y - h / 2));
+        const alpha = Math.max(0.25, 0.75 - c.ang / 160) * this.cueAlpha; // nearer = brighter
+        dot.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`;
+        dot.style.width = `${w}px`;
+        dot.style.height = `${h}px`;
         dot.style.background = c.color;
         dot.style.opacity = alpha.toFixed(2);
         dot.style.display = 'block';
-      });
+      }
     }
     for (let i = n; i < this.dots.length; i++) this.dots[i].style.display = 'none';
   }
