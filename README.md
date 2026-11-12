@@ -10,7 +10,7 @@ Turn your head and the 20° display sweeps across a workspace that stays put in 
 ![Build](https://img.shields.io/badge/build%20step-none-brightgreen)
 ![Status](https://img.shields.io/badge/status-proof%20of%20concept-orange)
 
-**Try it:** connect `https://fialuxe.github.io/DemiDoF/glasses.html` as a Web App (see [Quick start](#quick-start)).
+**Try it:** connect `https://fantaslab.github.io/DemiDoF/glasses.html` as a Web App (see [Quick start](#quick-start)).
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Hardware notes](#hardware-notes) · [Development](#development) · [Roadmap](#roadmap)
 
@@ -49,7 +49,7 @@ no native SDK.
 You need glasses firmware **v125+**, the Meta AI app **v272+**, and the page on a **public HTTPS
 URL**. Plain HTTP and self-signed certificates are rejected.
 
-1. Use the hosted copy, `https://fialuxe.github.io/DemiDoF/glasses.html` (GitHub Pages, built from
+1. Use the hosted copy, `https://fantaslab.github.io/DemiDoF/glasses.html` (GitHub Pages, built from
    `master`). To run your own build instead, serve the repo and open a tunnel to it:
 
    ```sh
