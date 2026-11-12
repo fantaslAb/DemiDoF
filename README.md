@@ -10,6 +10,8 @@ Turn your head and the 20° display sweeps across a workspace that stays put in 
 ![Build](https://img.shields.io/badge/build%20step-none-brightgreen)
 ![Status](https://img.shields.io/badge/status-proof%20of%20concept-orange)
 
+**Try it:** connect `https://fialuxe.github.io/DemiDoF/glasses.html` as a Web App (see [Quick start](#quick-start)).
+
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Hardware notes](#hardware-notes) · [Development](#development) · [Roadmap](#roadmap)
 
 ![DemiDoF on the glasses: the cards stay in the room while the 20° display moves with the head](docs/glasses.png)
@@ -35,7 +37,7 @@ no native SDK.
 | **What you see** | The 600 × 600 display itself, drawn on black (black is transparent on the waveguide) | A first-person room with the virtual display overlaid at its real size and place |
 | **Anchoring** | World-locked | Head-locked, world-locked, lazy follow, horizon-level |
 | **Head input** | The glasses' gyroscope and accelerometer, filtered and predicted | Mouse, keys, phone gyroscope, scripted demo, Quest WebXR (right eye only) |
-| **Content** | Cards across 120°, HUD demo, angular grid; a card is drawn only when half of it is in view, otherwise a dot on the edge shows where it is | Same, plus FOV / offset / roll / brightness sliders and PNG export of the device frame |
+| **Content** | Cards across 120°, HUD demo, angular grid; a card is drawn only when half of it is in view, otherwise a thin bar on the window edge shows where it is | Same, plus FOV / offset / roll / brightness sliders and PNG export of the device frame |
 | **Diagnostics** | On-screen readout, remote log to the dev server | Live numbers for head, display centre and content offset |
 
 ![The simulator's four anchoring modes with the head turned or rolled](docs/modes.png)
@@ -47,15 +49,16 @@ no native SDK.
 You need glasses firmware **v125+**, the Meta AI app **v272+**, and the page on a **public HTTPS
 URL**. Plain HTTP and self-signed certificates are rejected.
 
-1. Serve the repo and open a tunnel to it:
+1. Use the hosted copy, `https://fialuxe.github.io/DemiDoF/glasses.html` (GitHub Pages, built from
+   `master`). To run your own build instead, serve the repo and open a tunnel to it:
 
    ```sh
    python serve.py                                  # http://localhost:8000
    cloudflared tunnel --url http://localhost:8000   # prints https://<random>.trycloudflare.com
    ```
 
-   GitHub Pages also works, because the repo is static. The quick-tunnel URL changes every time the
-   tunnel restarts, for example after the PC sleeps.
+   The quick-tunnel URL changes every time the tunnel restarts, for example after the PC sleeps. The
+   remote log only works through your own `serve.py`; on GitHub Pages it gives up silently.
 2. In the Meta AI app, open **Settings → App Info** and tap **App version** five times. Enable
    **Developer Mode** (once).
 3. Go to **App Settings → Apps → Web Apps → Connect Web App**, enter `https://<host>/glasses.html`
@@ -140,13 +143,16 @@ tuned for a display.
 5. **Adaptive smoothing.** A One Euro–style low-pass uses 120 ms when the head is still and 12 ms
    when it moves. The content is still at rest and does not lag in motion. Rates below 0.5 °/s
    after bias removal count as zero, so a resting head does not drift.
+6. **Neck model.** The head turns about the base of the neck, so the eye moves with it: it sits
+   7.5 cm above and 8 cm in front of the pivot. The display camera moves the same way, and content
+   shifts against the room the way real objects do.
 
 ### Focus cues
 
 A card is drawn only while at least half of it is inside the 20° window. A card that is mostly
-outside is not what the wearer is looking at, so it is replaced by a dot on the window edge, in the
-card's colour, pointing to where it is. Nearer cards give larger, brighter dots; cards in the same
-direction line up side by side. Cards fade in and out over 120 ms, with hysteresis (appear at 50 %,
+outside is not what the wearer is looking at, so it is replaced by a short, thin bar on the window
+edge, in the card's colour, on the side where it is. Only the nearest hidden card per side gets a bar.
+The bars fade out while the head holds still on a card and come back when the head turns. Cards fade in and out over 120 ms, with hysteresis (appear at 50 %,
 disappear below 40 %), so nothing flickers at the edge. `src/focus.js` holds the rule.
 
 ### Battery
@@ -171,7 +177,7 @@ are not in Meta's documentation.
 | Compass heading | `deviceorientation` heading turns the opposite way to the gyro and jumps near β = 90° | Ignored while the gyroscope works; fusing it made the content spin |
 | Gyro bias | 1–2 °/s at rest | Learned while still (< 4 °/s for 0.6 s) |
 | Sensor rate | `devicemotion` and `deviceorientation` both at about 60 Hz | Fuses every motion sample |
-| Rendering | WebGL at about 60 fps | Renders the content straight to the canvas |
+| Rendering | WebGL at about 30 fps | Renders the content straight to the canvas |
 | Tap | Arrives as `Enter` keydown / keyup **and** a click on the canvas | Debounced into one action |
 | Swipes | Arrive as arrow keys | Content and readout |
 | Sensor permission | Remembered per domain; a refusal sticks | Re-enable it in the Web App menu → Permissions |
@@ -222,7 +228,10 @@ events do not move the gyro pose, recenter, the edge arrow and the drag fallback
 - [ ] Stability: drift-free heading without a compass, auto-recenter when the head rests
 - [x] Battery: draw only when the picture changes, nothing when the content is out of view, log off by default
 - [ ] Battery: measure the effect on the device
-- [ ] More content and interactions for the world-anchored workspace
+- [ ] Make the app usable for real tasks, not just a demo
+- [ ] Let the wearer adjust the layout: move, resize and add cards in place
+- [ ] Try modalities other than a flat panel: curved, layered or volumetric content, audio cues
+- [ ] Offline start (service worker) once the glasses support it
 - [ ] Record head-motion traces and replay them to compare anchoring modes
 
 ## Acknowledgments
